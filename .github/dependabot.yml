@@ -1,0 +1,25 @@
+version: 2
+
+# GitHub Actions は commit SHA で pin する(タグは書き換えられるため)。
+# Dependabot は SHA を追随しつつ末尾の `# vX.Y.Z` コメントも更新するので、
+# pin の維持コストはここで吸収される。
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # go.mod には本体の依存に加えて lint / vuln のツール依存も入る。
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # ツール依存(golangci-lint / govulncheck とその推移的依存)は
+      # バイナリに入らないため、まとめて 1 つの PR にする。
+      dev-tools:
+        patterns:
+          - github.com/golangci/*
+          - golang.org/x/vuln
+          - honnef.co/go/*
+          - mvdan.cc/*
