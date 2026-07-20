@@ -1,0 +1,43 @@
+name: vuln
+
+# 脆弱性検査だけを CI から切り離した専用ワークフロー。
+#
+# 分ける理由: CI が push / PR でしか走らないのに対し、脆弱性は**こちらが
+# 何も変更していなくても増える**。定期実行が要る検査を、変更起因の検査と
+# 同じトリガに縛っておくと、誰も push しない期間そのものが検出の空白になる。
+#
+# 実際、このリポジトリの最初の CI 実行では、M1 の時点から存在していた
+# GO-2026-4341 (net/url、store.go の sql.Open から到達可能) が検出された。
+# リポジトリを作るまで一度も走らなかったために表面化していなかった。
+#
+# govulncheck は「呼び出しているか」まで解析するため、go.sum に脆弱な
+# バージョンがあるだけでは落ちない。落ちたときは実際に到達可能である。
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  # 週 1 回。schedule はデフォルトブランチに対して実行される。
+  # 失敗すると GitHub からリポジトリ所有者へ通知が飛ぶ。
+  schedule:
+    - cron: '17 3 * * 1' # 毎週月曜 03:17 UTC (12:17 JST)
+  # 新しい CVE の報を見て手で回せるようにしておく。
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# govulncheck のバージョンは go.mod の tool ディレクティブで固定されている
+# ため、ワークフロー側にバージョンを書かない。Go 自体のバージョンも go.mod
+# が正である。**この検査は go.mod が宣言する最低バージョンで走らせる**
+# 意味があるので、stable に切り替えないこと。宣言した最低バージョンに
+# 到達可能な脆弱性があれば、それは利用者が踏む脆弱性である。
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: govulncheck
+        run: make vuln
