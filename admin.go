@@ -66,22 +66,22 @@ func (a *adminServer) adminMux() *http.ServeMux {
 	return mux
 }
 
+// adminWriteTimeout は admin socket の応答上限である。
+//
+// unseal / rotate-master は argon2 を伴い、semaphore の待ち行列にも入るため、
+// 他の listener より長く取る。
+const adminWriteTimeout = 60 * time.Second
+
 // newAdminHTTPServer は admin socket 用の http.Server を作る。
 //
-// **timeout はゼロだと無制限になる**(DESIGN §7.4)。全て設定する。
+// **timeout の設定は httpServerTimeouts に集約する**(DESIGN §7.4)。
+// ここで struct literal を書き写すと、他の listener と値が食い違っても
+// 誰も気付かない。
+//
+// ミドルウェア(no-store / パニックリカバリ)も他と同じものを被せる。
 func (a *adminServer) newAdminHTTPServer() *http.Server {
-	return &http.Server{
-		Handler:           a.adminMux(),
-		ReadHeaderTimeout: 5 * time.Second,
-		// unseal / rotate-master は argon2 を伴い、待ち行列に入ることがある。
-		// ReadTimeout はボディの読み切りに対する制限なので短くてよいが、
-		// WriteTimeout は argon2 の所要時間を含むため余裕を持たせる。
-		ReadTimeout:    15 * time.Second,
-		WriteTimeout:   60 * time.Second,
-		IdleTimeout:    60 * time.Second,
-		MaxHeaderBytes: 8 << 10,
-		ErrorLog:       slog.NewLogLogger(a.logger.Handler(), slog.LevelWarn),
-	}
+	handler := withMiddleware("admin", a.adminMux(), a.logger)
+	return httpServerTimeouts(handler, adminWriteTimeout, a.logger)
 }
 
 // ---- ハンドラ ----
@@ -227,7 +227,8 @@ func (a *adminServer) writeError(w http.ResponseWriter, code int, msg string) {
 // ようにするためである。
 func (a *adminServer) writeJSON(w http.ResponseWriter, code int, body any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
+	// ミドルウェアが付けるが、mux を直接叩く経路(テスト)でも効かせる。
+	setNoStore(w)
 	w.WriteHeader(code)
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		a.logger.Warn("could not write the admin response",

@@ -102,6 +102,32 @@ func closeStore(s *Store, err *error) {
 	}
 }
 
+// withTx はトランザクションを開き、fn が成功したら commit する。
+//
+// **fail closed の監査は本体の処理と同じトランザクションに載せる**
+// (THREAT_MODEL §10.4)。そのため書き込み経路はほぼ全てこの形になる。
+// begin / rollback / commit を書き写すたびに rollback を忘れる余地が
+// 生まれるので、1 箇所に集める。
+func withTx(ctx context.Context, db *sql.DB, fn func(tx *sql.Tx) error) (err error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, ignoreTxDone(tx.Rollback()))
+		}
+	}()
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+	return nil
+}
+
 // ---- keyring ----
 
 // ErrKeyringMissing は keyring 行が無いことを示す。`hokora init` が済んで
@@ -171,4 +197,187 @@ func UpdateKeyringWrap(ctx context.Context, ex execer, kr *Keyring) error {
 		return ErrKeyringMissing
 	}
 	return nil
+}
+
+// ---- Machine API のクエリ ----
+//
+// **全ての取得クエリで、全祖先の deleted_at IS NULL を検査する**
+// (AGENTS.md ルール 58)。project を論理削除しても配下の environment /
+// item の行は残るため、これを怠ると「削除した project の secret が
+// Machine API から取得できる」状態になる(THREAT_MODEL §11.1)。
+
+// ErrNotFound は対象が存在しない(または論理削除済みである)ことを示す。
+//
+// **呼び出し側はこれを「grant が無い」と同じ扱いにする。** 区別すると、
+// project / environment / item の存在情報が漏れる(AGENTS.md ルール 54)。
+var ErrNotFound = errors.New("not found")
+
+// FindMachineByClientID は client_id で machine を引く。
+//
+// **disabled も含めて返す。** 認証側で「存在しない」と「無効」を同じ
+// 応答に潰す必要があり、ここで振り分けると dummy hash 計算の機会を失う。
+func FindMachineByClientID(ctx context.Context, q querier, clientID string) (*Machine, error) {
+	var (
+		m          Machine
+		disabled   int
+		created    int64
+		updated    int64
+		lastAuthAt sql.NullInt64
+	)
+	err := q.QueryRowContext(ctx, `
+		SELECT id, client_id, secret_hash, name, disabled, created_at, updated_at, last_auth_at
+		FROM machines WHERE client_id = ?`, clientID,
+	).Scan(&m.ID, &m.ClientID, &m.SecretHash, &m.Name, &disabled, &created, &updated, &lastAuthAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find machine: %w", err)
+	}
+
+	m.Disabled = disabled != 0
+	m.CreatedAt = time.Unix(created, 0).UTC()
+	m.UpdatedAt = time.Unix(updated, 0).UTC()
+	if lastAuthAt.Valid {
+		t := time.Unix(lastAuthAt.Int64, 0).UTC()
+		m.LastAuthAt = &t
+	}
+	return &m, nil
+}
+
+// MachineIsActive は machine が有効かどうかを返す。
+//
+// **リクエストごとに呼ぶ。** トークンは認証の証明であって認可の証明では
+// ないため、disabled は毎回読み直す(DESIGN §4.5)。
+func MachineIsActive(ctx context.Context, q querier, machineID int64) (bool, error) {
+	var disabled int
+	err := q.QueryRowContext(ctx,
+		`SELECT disabled FROM machines WHERE id = ?`, machineID).Scan(&disabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check machine: %w", err)
+	}
+	return disabled == 0, nil
+}
+
+// EnvironmentRef は解決済みの project / environment である。
+// 監査ログの immutable ID と表示用文字列の両方をここから作る。
+type EnvironmentRef struct {
+	ProjectID     int64
+	EnvironmentID int64
+	ProjectSlug   string
+	EnvSlug       string
+}
+
+// ResolveEnvironment は project slug と environment slug から ID を引く。
+//
+// **project と environment の両方の deleted_at を検査する。** environment
+// 側だけを見ると、project を論理削除しても配下が生き残る。
+func ResolveEnvironment(ctx context.Context, q querier, projectSlug, envSlug string) (*EnvironmentRef, error) {
+	ref := EnvironmentRef{ProjectSlug: projectSlug, EnvSlug: envSlug}
+	err := q.QueryRowContext(ctx, `
+		SELECT p.id, e.id
+		FROM environments e
+		JOIN projects p ON p.id = e.project_id
+		WHERE p.slug = ? AND e.slug = ?
+		  AND p.deleted_at IS NULL AND e.deleted_at IS NULL`,
+		projectSlug, envSlug,
+	).Scan(&ref.ProjectID, &ref.EnvironmentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve environment: %w", err)
+	}
+	return &ref, nil
+}
+
+// HasGrant は machine が environment への grant を持つかを返す。
+//
+// **grant は物理削除される。** 削除された時点で次のリクエストから効く
+// (DESIGN §4.5)。
+func HasGrant(ctx context.Context, q querier, machineID, environmentID int64) (bool, error) {
+	var one int
+	err := q.QueryRowContext(ctx, `
+		SELECT 1 FROM machine_grants WHERE machine_id = ? AND environment_id = ?`,
+		machineID, environmentID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check grant: %w", err)
+	}
+	return true, nil
+}
+
+// EncryptedSecret は暗号化されたままの secret 1 件である。
+// 復号は Vault の read lock 内で行う(C1)ため、ここでは値を触らない。
+type EncryptedSecret struct {
+	ItemID     int64
+	Key        string
+	Version    int64
+	ValueEnc   []byte
+	Nonce      []byte
+	DEKVersion int64
+}
+
+// selectSecretsSQL は environment 配下の secret を、全祖先の deleted_at を
+// 検査しつつ取得する。
+//
+// items.current_version と item_versions.version の JOIN で最新版のみを引く。
+// **version パラメータは受け取らない**(DESIGN §8.1)。
+//
+//nolint:gosec // G101: 認証情報ではなく SQL である(secret という語に反応している)
+const selectSecretsSQL = `
+SELECT i.id, i.key, v.version, v.value_enc, v.nonce, v.dek_version
+FROM items i
+JOIN item_versions v ON v.item_id = i.id AND v.version = i.current_version
+JOIN environments e ON e.id = i.environment_id
+JOIN projects p ON p.id = e.project_id
+WHERE i.environment_id = ?
+  AND i.deleted_at IS NULL
+  AND e.deleted_at IS NULL
+  AND p.deleted_at IS NULL
+  AND i.current_version > 0`
+
+// ListEncryptedSecrets は environment 配下の全 secret を暗号文のまま返す。
+func ListEncryptedSecrets(ctx context.Context, db *sql.DB, environmentID int64) (_ []EncryptedSecret, err error) {
+	rows, err := db.QueryContext(ctx, selectSecretsSQL+` ORDER BY i.key`, environmentID)
+	if err != nil {
+		return nil, fmt.Errorf("list secrets: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("list secrets: %w", cerr)
+		}
+	}()
+
+	var secrets []EncryptedSecret
+	for rows.Next() {
+		var s EncryptedSecret
+		if err := rows.Scan(&s.ItemID, &s.Key, &s.Version, &s.ValueEnc, &s.Nonce, &s.DEKVersion); err != nil {
+			return nil, fmt.Errorf("scan secret: %w", err)
+		}
+		secrets = append(secrets, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list secrets: %w", err)
+	}
+	return secrets, nil
+}
+
+// GetEncryptedSecret は 1 件の secret を暗号文のまま返す。
+func GetEncryptedSecret(ctx context.Context, q querier, environmentID int64, key string) (*EncryptedSecret, error) {
+	var s EncryptedSecret
+	err := q.QueryRowContext(ctx, selectSecretsSQL+` AND i.key = ?`, environmentID, key).
+		Scan(&s.ItemID, &s.Key, &s.Version, &s.ValueEnc, &s.Nonce, &s.DEKVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get secret: %w", err)
+	}
+	return &s, nil
 }

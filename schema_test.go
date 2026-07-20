@@ -21,7 +21,7 @@ func requireEnvironment(t *testing.T, db *sql.DB, slug string) int64 {
 	t.Helper()
 
 	projectID := insertProject(t, db, slug, false)
-	if err := insertEnvironment(t, db, projectID, slug); err != nil {
+	if _, err := insertEnvironmentErr(t, db, projectID, slug, false); err != nil {
 		t.Fatalf("insert environment: %v", err)
 	}
 

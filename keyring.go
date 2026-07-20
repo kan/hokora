@@ -440,29 +440,14 @@ func (v *Vault) RotateMaster(ctx context.Context, oldMK, newMK []byte, ac auditC
 }
 
 // rotateInTx は keyring の更新と監査を 1 トランザクションで確定させる。
-func (v *Vault) rotateInTx(ctx context.Context, next *Keyring, ac auditCtx) (err error) {
-	tx, err := v.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin rotate-master transaction: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, ignoreTxDone(tx.Rollback()))
+func (v *Vault) rotateInTx(ctx context.Context, next *Keyring, ac auditCtx) error {
+	return withTx(ctx, v.db, func(tx *sql.Tx) error {
+		if err := UpdateKeyringWrap(ctx, tx, next); err != nil {
+			return err
 		}
-	}()
-
-	if err := UpdateKeyringWrap(ctx, tx, next); err != nil {
-		return err
-	}
-	// fail closed: 監査が書けなければ rotate も確定させない。
-	if err := RecordAudit(ctx, tx, ac.entry(ActionMasterRotate, ResultSuccess, nil)); err != nil {
-		return err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit rotate-master: %w", err)
-	}
-	return nil
+		// fail closed: 監査が書けなければ rotate も確定させない。
+		return RecordAudit(ctx, tx, ac.entry(ActionMasterRotate, ResultSuccess, nil))
+	})
 }
 
 // verifyRewrap は keyring から DEK を復元し、元の DEK と一致するか確かめる。

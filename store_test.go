@@ -57,15 +57,34 @@ func insertProject(t *testing.T, db *sql.DB, slug string, deleted bool) int64 {
 	return id
 }
 
-func insertEnvironment(t *testing.T, db *sql.DB, projectID int64, slug string) error {
+// insertEnvironment は environment を 1 行作り、その ID を返す。
+// FK 違反などのエラーを見たいテストは insertEnvironmentErr を使う。
+func insertEnvironment(t *testing.T, db *sql.DB, projectID int64, slug string, deleted bool) int64 {
+	t.Helper()
+
+	id, err := insertEnvironmentErr(t, db, projectID, slug, deleted)
+	if err != nil {
+		t.Fatalf("insert environment %q: %v", slug, err)
+	}
+	return id
+}
+
+func insertEnvironmentErr(t *testing.T, db *sql.DB, projectID int64, slug string, deleted bool) (int64, error) {
 	t.Helper()
 
 	now := time.Now().Unix()
-	_, err := db.ExecContext(t.Context(),
-		`INSERT INTO environments (project_id, slug, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
-		projectID, slug, slug, now, now,
+	var deletedAt any
+	if deleted {
+		deletedAt = now
+	}
+	res, err := db.ExecContext(t.Context(),
+		`INSERT INTO environments (project_id, slug, name, deleted_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		projectID, slug, slug, deletedAt, now, now,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
 }
 
 // DSN は "file:<path>?_pragma=..." の URI 形式なので、path 中の ? や # を
@@ -208,7 +227,7 @@ func TestForeignKeyRejectsMissingParent(t *testing.T) {
 
 	store := newTestStore(t)
 
-	err := insertEnvironment(t, store.DB(), 9999, "prod")
+	_, err := insertEnvironmentErr(t, store.DB(), 9999, "prod", false)
 	if err == nil {
 		t.Fatal("inserted an environment referencing a nonexistent project; foreign_keys is not in effect")
 	}
@@ -225,7 +244,7 @@ func TestForeignKeyRestrictsParentDelete(t *testing.T) {
 	db := store.DB()
 
 	projectID := insertProject(t, db, "billing", false)
-	if err := insertEnvironment(t, db, projectID, "prod"); err != nil {
+	if _, err := insertEnvironmentErr(t, db, projectID, "prod", false); err != nil {
 		t.Fatalf("insert environment: %v", err)
 	}
 
@@ -492,5 +511,187 @@ func TestLoadKeyringMissing(t *testing.T) {
 	store := newTestStore(t)
 	if _, err := LoadKeyring(t.Context(), store.DB()); !errors.Is(err, ErrKeyringMissing) {
 		t.Fatalf("error = %v, want ErrKeyringMissing", err)
+	}
+}
+
+// ---- withTx ----
+
+// withTx は fn が失敗したら **必ず rollback する**。
+//
+// 監査を本体の処理と同じトランザクションに載せる前提(THREAT_MODEL §10.4)は、
+// 「失敗したら本体も残らない」ことで初めて fail closed になる。ここが漏れると
+// 「監査は書けなかったが machine は作られた」行が生まれる。
+func TestWithTxRollsBackOnError(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	sentinel := errors.New("boom")
+
+	err := withTx(t.Context(), store.DB(), func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(t.Context(),
+			`INSERT INTO projects (slug, name, created_at, updated_at) VALUES ('half', 'half', 0, 0)`); err != nil {
+			return err
+		}
+		return sentinel
+	})
+	// エラーは握りつぶさず、そのまま識別できる形で返る。
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("error = %v, want the sentinel", err)
+	}
+
+	var n int
+	if err := store.DB().QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM projects WHERE slug = 'half'`).Scan(&n); err != nil {
+		t.Fatalf("count projects: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("%d rows survived a rolled back transaction", n)
+	}
+}
+
+// 成功したら commit される(rollback しかしないのでは書き込めない)。
+func TestWithTxCommitsOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	if err := withTx(t.Context(), store.DB(), func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(t.Context(),
+			`INSERT INTO projects (slug, name, created_at, updated_at) VALUES ('kept', 'kept', 0, 0)`)
+		return err
+	}); err != nil {
+		t.Fatalf("withTx: %v", err)
+	}
+
+	var n int
+	if err := store.DB().QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM projects WHERE slug = 'kept'`).Scan(&n); err != nil {
+		t.Fatalf("count projects: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("%d rows after a committed transaction, want 1", n)
+	}
+}
+
+// トランザクションを開けない場合も、fn を呼ばずにエラーを返す。
+//
+// **fn が呼ばれてしまうと、tx が nil のまま本体の処理に入る。**
+func TestWithTxFailsWhenTheTransactionCannotBegin(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	called := false
+	err := withTx(t.Context(), store.DB(), func(*sql.Tx) error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("withTx succeeded against a closed database")
+	}
+	if called {
+		t.Error("fn was called even though the transaction could not begin")
+	}
+	if !strings.Contains(err.Error(), "begin transaction") {
+		t.Errorf("error = %v, want it to say which step failed", err)
+	}
+}
+
+// ---- Machine API のクエリ(全祖先の deleted_at 検査。ルール 58) ----
+
+// **project と environment の両方の deleted_at を検査する。**
+//
+// 片方だけを見る実装(environment.deleted_at のみ)は、project を論理削除しても
+// 配下の environment が生き残るため、「削除した project の secret が Machine API
+// から取れる」状態を作る(THREAT_MODEL §11.1)。逆に project だけを見る実装も
+// 同様に穴になるので、両方向を固定する。
+func TestResolveEnvironmentChecksEveryAncestor(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	db := store.DB()
+
+	live := insertProject(t, db, "live", false)
+	insertEnvironment(t, db, live, "prod", false)
+	insertEnvironment(t, db, live, "gone", true) // environment だけ論理削除
+
+	deleted := insertProject(t, db, "archived", true)
+	insertEnvironment(t, db, deleted, "prod", false) // project だけ論理削除
+
+	// **同じ env slug が別 project に存在する。** JOIN の条件を落として
+	// slug だけで引く実装だと、別 project の environment を返してしまう。
+	other := insertProject(t, db, "other", false)
+	otherProd := insertEnvironment(t, db, other, "prod", false)
+
+	tests := []struct {
+		name              string
+		project, env      string
+		wantErr           bool
+		wantEnvironmentID int64
+	}{
+		{name: "live project and environment", project: "live", env: "prod"},
+		{name: "environment soft deleted", project: "live", env: "gone", wantErr: true},
+		{name: "project soft deleted", project: "archived", env: "prod", wantErr: true},
+		{name: "unknown project", project: "nope", env: "prod", wantErr: true},
+		{name: "unknown environment", project: "live", env: "nope", wantErr: true},
+		// project をまたいだ取り違えが起きていないこと。
+		{name: "same env slug under another project", project: "other", env: "prod", wantEnvironmentID: otherProd},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ref, err := ResolveEnvironment(t.Context(), db, tt.project, tt.env)
+			if tt.wantErr {
+				if !errors.Is(err, ErrNotFound) {
+					t.Fatalf("error = %v, want ErrNotFound", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveEnvironment: %v", err)
+			}
+			if ref.ProjectSlug != tt.project || ref.EnvSlug != tt.env {
+				t.Errorf("ref = %+v, want %s/%s", ref, tt.project, tt.env)
+			}
+			if tt.wantEnvironmentID != 0 && ref.EnvironmentID != tt.wantEnvironmentID {
+				t.Errorf("environment id = %d, want %d", ref.EnvironmentID, tt.wantEnvironmentID)
+			}
+		})
+	}
+}
+
+// MachineIsActive は毎リクエスト呼ばれる(DESIGN §4.5)。
+//
+// **存在しない machine は「有効」ではない。** ここで true に倒れると、
+// 物理削除された(あるいは取り違えた)ID のトークンが通ってしまう。
+func TestMachineIsActive(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	id, _, err := CreateMachine(t.Context(), store.DB(), "app-prod", "app server",
+		auditCtx{Actor: ActorAnonymous, Now: vaultNow})
+	if err != nil {
+		t.Fatalf("CreateMachine: %v", err)
+	}
+
+	active, err := MachineIsActive(t.Context(), store.DB(), id)
+	if err != nil || !active {
+		t.Fatalf("MachineIsActive = (%v, %v), want (true, nil)", active, err)
+	}
+
+	if active, err := MachineIsActive(t.Context(), store.DB(), id+1000); err != nil || active {
+		t.Errorf("MachineIsActive for a missing row = (%v, %v), want (false, nil)", active, err)
+	}
+
+	if _, err := store.DB().ExecContext(t.Context(),
+		`UPDATE machines SET disabled = 1 WHERE id = ?`, id); err != nil {
+		t.Fatalf("disable machine: %v", err)
+	}
+	if active, err := MachineIsActive(t.Context(), store.DB(), id); err != nil || active {
+		t.Errorf("MachineIsActive after disable = (%v, %v), want (false, nil)", active, err)
 	}
 }

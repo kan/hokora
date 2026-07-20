@@ -54,6 +54,17 @@ const rateWindow = time.Minute
 // unsealRate は unseal の制限である。**グローバル**に効かせる。
 const unsealRate = 3
 
+// Machine API の認証に対する制限(DESIGN §7.4)。
+//
+// **第一段は送信元 IP である**(AGENTS.md ルール 35)。client_id はリクエスト
+// ボディに入っている攻撃者制御の値なので、そちらだけで制限すると、値を
+// 変えるだけで無制限に試行できてしまう。第二段の client_id 制限は、1 つの
+// credential に対する総当たりを鈍らせるための追加の網である。
+const (
+	authTokenRatePerIP       = 30
+	authTokenRatePerClientID = 10
+)
+
 // globalKey は「キーで分けない」制限に使う固定キーである。
 //
 // unseal をグローバルに制限するのは、送信元 IP でも MK 入力でも分けたくない
