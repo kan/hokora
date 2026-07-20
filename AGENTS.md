@@ -283,7 +283,7 @@
 
 | 項目 | 選択 | 備考 |
 |------|------|------|
-| 言語 | Go 1.25.6+ | `modernc.org/sqlite` v1.54 が `go 1.25.0` を要求し、`net/url` の GO-2026-4341 が 1.25.6 で修正されたため。`go.mod` が正 |
+| 言語 | Go 1.26.5+ | `go.mod` が正。**最低バージョンは「既知の到達可能な脆弱性が無い最新の安定版」に合わせる。** CI は `go-version-file: go.mod` でこの版を入れるため、宣言が古いと CI は古い(脆弱な)処理系で走り続ける |
 | DB | SQLite | `modernc.org/sqlite`(CGO 不要) |
 | DB アクセス | `database/sql` + 素の SQL | **ORM を使わない** |
 | HTTP | `net/http` + `http.ServeMux` | **Web フレームワークを使わない** |
