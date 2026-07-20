@@ -12,6 +12,6 @@
 *.key
 master-key*
 
-# プラグインが配布する生成物(comlinks-tools は無効化済み。
-# .claude/settings.json 参照)
+# プラグインが配布する生成物(comlinks-tools は org ゲートにより
+# このリポジトリでは配布されないが、誤混入防止のため残す)
 .claude/rules/shared/
