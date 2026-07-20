@@ -1,0 +1,157 @@
+package main
+
+import (
+	"errors"
+	"io"
+	"os"
+	"strings"
+	"testing"
+)
+
+// captureOutput は f の実行中に os.Stdout / os.Stderr を差し替え、書き込まれた
+// 内容を文字列として返す。os.Stdout / os.Stderr はパッケージ変数なので、
+// t.Parallel() を呼ぶ他のテストと同時に走ると出力が混線する。このヘルパーを
+// 使うテストは t.Parallel() を呼ばないこと(Go のテストランナーは、並列化して
+// いない top-level テストを、並列テスト群を動かす前に順番に完走させるため、
+// これを守れば競合しない)。
+func captureOutput(t *testing.T, f func()) (stdout, stderr string) {
+	t.Helper()
+
+	origOut, origErr := os.Stdout, os.Stderr
+	t.Cleanup(func() { os.Stdout, os.Stderr = origOut, origErr })
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stderr pipe: %v", err)
+	}
+	os.Stdout, os.Stderr = outW, errW
+
+	f()
+
+	outW.Close()
+	errW.Close()
+	outBytes, err := io.ReadAll(outR)
+	if err != nil {
+		t.Fatalf("read stdout pipe: %v", err)
+	}
+	errBytes, err := io.ReadAll(errR)
+	if err != nil {
+		t.Fatalf("read stderr pipe: %v", err)
+	}
+	return string(outBytes), string(errBytes)
+}
+
+// run(nil) はエラーを返し、使い方を stderr に出す。「エラーは返すが usage は
+// 出さない」実装に戻ると、対話的に打ち間違えたユーザーが何も手がかりを得られなく
+// なるので、両方を確認する。
+func TestRunWithNoArgsPrintsUsageAndErrors(t *testing.T) {
+	var err error
+	stdout, stderr := captureOutput(t, func() {
+		err = run(t.Context(), nil)
+	})
+
+	if err == nil {
+		t.Fatal("run(nil) = nil, want an error")
+	}
+	if !strings.Contains(stderr, "Usage:") {
+		t.Errorf("stderr = %q, want it to contain usage text", stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+}
+
+// help / -h / --help は失敗ではない。usage を stdout に出して 0 で終了しなければ
+// ならない(main() は err != nil のときだけ os.Exit(1) するため)。
+func TestRunHelpVariantsSucceedAndPrintUsageToStdout(t *testing.T) {
+	for _, arg := range []string{"help", "-h", "--help"} {
+		t.Run(arg, func(t *testing.T) {
+			var err error
+			stdout, stderr := captureOutput(t, func() {
+				err = run(t.Context(), []string{arg})
+			})
+
+			if err != nil {
+				t.Errorf("run(%q) = %v, want nil", arg, err)
+			}
+			if !strings.Contains(stdout, "Usage:") {
+				t.Errorf("stdout = %q, want it to contain usage text", stdout)
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q, want empty", stderr)
+			}
+		})
+	}
+}
+
+// 未知のコマンドはエラーを返し、usage を stderr に出す。エラーメッセージに
+// 入力されたコマンド名が含まれないと、何を打ち間違えたのか利用者に伝わらない。
+func TestRunWithUnknownCommand(t *testing.T) {
+	var err error
+	stdout, stderr := captureOutput(t, func() {
+		err = run(t.Context(), []string{"bogus-command"})
+	})
+
+	if err == nil {
+		t.Fatal("run with an unknown command = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "bogus-command") {
+		t.Errorf("error = %v, want it to name the unknown command", err)
+	}
+	if !strings.Contains(stderr, "Usage:") {
+		t.Errorf("stderr = %q, want it to contain usage text", stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+}
+
+// M1 でまだ実装されていないサブコマンドは、"not implemented" であって
+// "unknown command" ではないことを区別できなければならない。前者は
+// hokora 側の既知の未実装、後者は利用者の打ち間違いであり、運用者への
+// メッセージが変わる。
+func TestRunUnimplementedCommands(t *testing.T) {
+	for _, cmd := range []string{
+		"gen-key", "serve", "unseal", "seal", "status", "rotate-master", "get", "run",
+	} {
+		t.Run(cmd, func(t *testing.T) {
+			err := run(t.Context(), []string{cmd})
+			if !errors.Is(err, errNotImplemented) {
+				t.Errorf("run(%q) = %v, want it to wrap errNotImplemented", cmd, err)
+			}
+			if !strings.Contains(err.Error(), cmd) {
+				t.Errorf("error = %v, want it to name the command %q", err, cmd)
+			}
+		})
+	}
+}
+
+// run が "init" をそのサブコマンドの引数(rest)に正しく振り分けることを、
+// 実際に DB が初期化されることで確認する。cmd, rest := args[0], args[1:] の
+// スライシングを間違えると、フラグがコマンド名に食われて崩れる。
+func TestRunDispatchesInitWithItsArgs(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/hokora.db"
+
+	var err error
+	stdout, _ := captureOutput(t, func() {
+		err = run(t.Context(), []string{"init", "-db", path})
+	})
+
+	if err != nil {
+		t.Fatalf("run([init -db %s]) = %v, want nil", path, err)
+	}
+	if !strings.Contains(stdout, path) {
+		t.Errorf("stdout = %q, want it to mention %q", stdout, path)
+	}
+
+	store, openErr := OpenStore(t.Context(), path)
+	if openErr != nil {
+		t.Fatalf("OpenStore after run(init): %v", openErr)
+	}
+	store.Close()
+}

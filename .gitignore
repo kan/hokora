@@ -1,0 +1,17 @@
+# ビルド成果物
+/hokora
+/dist/
+
+# ローカルの DB(secret と監査ログが入る。絶対にコミットしない)
+*.db
+*.db-wal
+*.db-shm
+
+# 鍵・証明書の類。誤コミット防止のため拡張子ごと除外する
+*.pem
+*.key
+master-key*
+
+# プラグインが配布する生成物(comlinks-tools は無効化済み。
+# .claude/settings.json 参照)
+.claude/rules/shared/

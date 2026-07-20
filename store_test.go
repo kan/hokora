@@ -1,0 +1,364 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// newTestStore は空の DB を作り、スキーマを適用して返す。
+func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	return newTestStoreAt(t, filepath.Join(t.TempDir(), "hokora.db"))
+}
+
+func newTestStoreAt(t *testing.T, path string) *Store {
+	t.Helper()
+
+	store, err := openDatabase(t.Context(), path)
+	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	if err := Migrate(t.Context(), store.DB()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	return store
+}
+
+// insertProject / insertEnvironment は各テストが必要とする最小の行を作る。
+// M2 以降のテストも同じ行を必要とするため、INSERT 文はここに集約する。
+func insertProject(t *testing.T, db *sql.DB, slug string, deleted bool) int64 {
+	t.Helper()
+
+	now := time.Now().Unix()
+	var deletedAt any
+	if deleted {
+		deletedAt = now
+	}
+	res, err := db.ExecContext(t.Context(),
+		`INSERT INTO projects (slug, name, deleted_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		slug, slug, deletedAt, now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert project %q: %v", slug, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("last insert id: %v", err)
+	}
+	return id
+}
+
+func insertEnvironment(t *testing.T, db *sql.DB, projectID int64, slug string) error {
+	t.Helper()
+
+	now := time.Now().Unix()
+	_, err := db.ExecContext(t.Context(),
+		`INSERT INTO environments (project_id, slug, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		projectID, slug, slug, now, now,
+	)
+	return err
+}
+
+// DSN は "file:<path>?_pragma=..." の URI 形式なので、path 中の ? や # を
+// エスケープし損ねると、SQLite がクエリ文字列の区切りとして解釈して別のファイルを
+// 開いてしまう。--db に何が渡されても、開かれるのは指定されたパスであることを
+// 確認する。
+func TestOpenDatabaseUsesTheGivenPathVerbatim(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{
+		"plain.db", "with space.db", "q?x.db", "h#x.db", "pct%20.db",
+		"amp&x.db", "eq=x.db", "plus+x.db", "日本語.db",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), name)
+			store := newTestStoreAt(t, path)
+			// 実際に書き込みが起きたファイルが path であることを確認する。
+			insertProject(t, store.DB(), "probe", false)
+
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("database was not created at the requested path: %v", err)
+			}
+		})
+	}
+}
+
+// pragmaChecks は各物理接続で成立していなければならない設定である。
+// foreign_keys が効いていなければ ON DELETE RESTRICT による保護が成立しない。
+var pragmaChecks = []struct {
+	pragma string
+	want   string
+}{
+	{"foreign_keys", "1"},
+	{"journal_mode", "wal"},
+	{"busy_timeout", "5000"},
+	{"synchronous", "2"}, // FULL
+}
+
+// 期待値は connectPragmas から導出せずに手で書く(導出すると、設定が消えても
+// テストが一緒に消えて素通りする)。代わりに、設定した PRAGMA が全て検査対象に
+// 入っていることをここで突き合わせる。
+func TestEveryConfiguredPragmaIsChecked(t *testing.T) {
+	t.Parallel()
+
+	checked := make(map[string]bool, len(pragmaChecks))
+	for _, c := range pragmaChecks {
+		checked[c.pragma] = true
+	}
+	for _, p := range connectPragmas {
+		name, _, ok := strings.Cut(p, "(")
+		if !ok {
+			t.Errorf("malformed pragma %q in connectPragmas", p)
+			continue
+		}
+		if !checked[name] {
+			t.Errorf("PRAGMA %s is configured but never verified; add it to pragmaChecks", name)
+		}
+	}
+}
+
+func checkPragmas(ctx context.Context, t *testing.T, conn *sql.Conn, label string) {
+	t.Helper()
+
+	for _, c := range pragmaChecks {
+		var got string
+		if err := conn.QueryRowContext(ctx, "PRAGMA "+c.pragma).Scan(&got); err != nil {
+			t.Fatalf("%s: PRAGMA %s: %v", label, c.pragma, err)
+		}
+		if !strings.EqualFold(got, c.want) {
+			t.Errorf("%s: PRAGMA %s = %q, want %q", label, c.pragma, got, c.want)
+		}
+	}
+}
+
+// 同時に開いた複数の物理接続すべてで PRAGMA が効いていることを確認する。
+// 起動時に 1 接続だけで PRAGMA を実行する実装では、このテストが落ちる。
+func TestPragmasAppliedToEveryConnection(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	ctx := t.Context()
+
+	// プール上限と同数を同時に取る。ここに数値を直書きすると、上限を下げたときに
+	// テストは失敗せず Conn の待ちでブロックする。
+	const n = maxOpenConns
+	conns := make([]*sql.Conn, 0, n)
+	for i := range n {
+		conn, err := store.DB().Conn(ctx)
+		if err != nil {
+			t.Fatalf("acquire conn %d: %v", i, err)
+		}
+		defer conn.Close()
+		conns = append(conns, conn)
+	}
+
+	// 全て同時に保持した状態で検査する(=別々の物理接続であることが保証される)。
+	for _, conn := range conns {
+		checkPragmas(ctx, t, conn, "conn")
+	}
+}
+
+// 接続が破棄されて再生成された後も PRAGMA が効いていることを確認する。
+// 接続はプールの都合や障害で作り直されるため、「起動時に 1 回適用した」では足りない。
+func TestPragmasAppliedToRecreatedConnection(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	ctx := t.Context()
+	db := store.DB()
+
+	// idle 接続を保持させない。Close した時点で物理接続が破棄される。
+	db.SetMaxIdleConns(0)
+
+	// SetMaxIdleConns 自体が、それまでの idle 接続(Ping が張ったもの)を閉じて
+	// MaxIdleClosed を進める。基準を取っておかないと、下の検査はループが接続を
+	// 作り直していなくても通ってしまう。
+	before := db.Stats().MaxIdleClosed
+
+	for i := range 3 {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("acquire conn %d: %v", i, err)
+		}
+		checkPragmas(ctx, t, conn, "recreated conn")
+		if err := conn.Close(); err != nil {
+			t.Fatalf("close conn %d: %v", i, err)
+		}
+	}
+
+	if closed := db.Stats().MaxIdleClosed; closed <= before {
+		t.Fatal("no connection was actually closed; the test did not exercise reconnection")
+	}
+}
+
+// FK が実際に効いていること(存在しない親を参照できないこと)を確認する。
+func TestForeignKeyRejectsMissingParent(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+
+	err := insertEnvironment(t, store.DB(), 9999, "prod")
+	if err == nil {
+		t.Fatal("inserted an environment referencing a nonexistent project; foreign_keys is not in effect")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "foreign key") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// ON DELETE RESTRICT が効いていること(子を持つ親を消せないこと)を確認する。
+func TestForeignKeyRestrictsParentDelete(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	db := store.DB()
+
+	projectID := insertProject(t, db, "billing", false)
+	if err := insertEnvironment(t, db, projectID, "prod"); err != nil {
+		t.Fatalf("insert environment: %v", err)
+	}
+
+	if _, err := db.ExecContext(t.Context(), `DELETE FROM projects WHERE id = ?`, projectID); err == nil {
+		t.Fatal("deleted a project that still has environments; ON DELETE RESTRICT is not in effect")
+	}
+}
+
+// 論理削除された slug が再利用できること(部分 UNIQUE インデックス)を確認する。
+func TestDeletedSlugIsReusable(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	db := store.DB()
+
+	insertProject(t, db, "myapp", true)  // 論理削除済み
+	insertProject(t, db, "myapp", false) // 同じ slug を再利用できる
+
+	// 生存中の slug は重複できない。
+	now := time.Now().Unix()
+	if _, err := db.ExecContext(t.Context(),
+		`INSERT INTO projects (slug, name, created_at, updated_at) VALUES (?, ?, ?, ?)`,
+		"myapp", "duplicate", now, now,
+	); err == nil {
+		t.Fatal("inserted a duplicate live slug; the partial unique index is not in effect")
+	}
+}
+
+// 論理削除できる全てのテーブルで、UNIQUE インデックスが部分インデックスに
+// なっていることを確認する。1 つでも漏れると、そのテーブルでは削除した名前を
+// 二度と再利用できなくなる(THREAT_MODEL §11.2)。
+func TestUniqueIndexesOnSoftDeletableTablesArePartial(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+
+	// deleted_at を持つテーブル = 論理削除できるテーブル。対象を列挙せず
+	// スキーマから導くことで、テーブルが増えても検査から漏れない。
+	rows, err := store.DB().QueryContext(t.Context(), `
+		SELECT m.name, i.name, COALESCE(i.sql, '')
+		  FROM sqlite_master m
+		  JOIN sqlite_master i ON i.type = 'index' AND i.tbl_name = m.name
+		 WHERE m.type = 'table'
+		   AND EXISTS (SELECT 1 FROM pragma_table_info(m.name) c WHERE c.name = 'deleted_at')`)
+	if err != nil {
+		t.Fatalf("list indexes: %v", err)
+	}
+	defer rows.Close()
+
+	checked := 0
+	for rows.Next() {
+		var table, index, ddl string
+		if err := rows.Scan(&table, &index, &ddl); err != nil {
+			t.Fatalf("scan index: %v", err)
+		}
+		// ddl が空なのは UNIQUE 制約由来の自動インデックス。部分にできないので
+		// そもそも使ってはならない。
+		if ddl != "" && !strings.Contains(strings.ToUpper(ddl), "UNIQUE") {
+			continue
+		}
+		checked++
+		if !strings.Contains(ddl, "WHERE deleted_at IS NULL") {
+			t.Errorf("%s.%s is a unique index without `WHERE deleted_at IS NULL`; "+
+				"soft-deleted names would never be reusable", table, index)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("list indexes: %v", err)
+	}
+	if checked == 0 {
+		t.Fatal("found no unique index to check; the query is wrong")
+	}
+}
+
+// 全ての外部キーが ON DELETE RESTRICT であり、audit_logs だけが FK を
+// 持たないことを確認する。CASCADE を 1 箇所でも混ぜると、親の削除が子を
+// 巻き込んで消してしまう(AGENTS.md ルール 57)。
+func TestAllForeignKeysAreRestrict(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+
+	// pragma_foreign_key_list は table-valued function としても使えるので、
+	// テーブルを 1 つずつ回さずに全 FK を 1 クエリで取れる。列は名前で選ぶため、
+	// SQLite のバージョンで PRAGMA の列構成が増えても壊れない。
+	rows, err := store.DB().QueryContext(t.Context(), `
+		SELECT m.name, f."from", f."table", f.on_delete
+		  FROM sqlite_master m
+		  JOIN pragma_foreign_key_list(m.name) f
+		 WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		t.Fatalf("list foreign keys: %v", err)
+	}
+	defer rows.Close()
+
+	found := 0
+	for rows.Next() {
+		var table, from, parent, onDelete string
+		if err := rows.Scan(&table, &from, &parent, &onDelete); err != nil {
+			t.Fatalf("scan foreign key: %v", err)
+		}
+		found++
+		if table == "audit_logs" {
+			t.Errorf("audit_logs.%s references %s; audit records must survive their referents",
+				from, parent)
+		}
+		if got := strings.ToUpper(onDelete); got != "RESTRICT" {
+			t.Errorf("%s.%s -> %s: ON DELETE %s, want RESTRICT", table, from, parent, got)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("list foreign keys: %v", err)
+	}
+	// FK が 1 本も取れないなら、クエリが壊れていて素通りしている。
+	if found == 0 {
+		t.Fatal("found no foreign key to check; the query is wrong")
+	}
+}
+
+// スキーマ適用直後に FK の不整合が残っていないことを確認する。
+func TestForeignKeyCheckIsEmpty(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+
+	rows, err := store.DB().QueryContext(t.Context(), `PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatalf("foreign_key_check: %v", err)
+	}
+	defer rows.Close()
+
+	if rows.Next() {
+		t.Error("foreign_key_check reported a violation")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("foreign_key_check rows: %v", err)
+	}
+}

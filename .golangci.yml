@@ -1,0 +1,43 @@
+version: "2"
+
+linters:
+  # standard = errcheck / govet / ineffassign / staticcheck / unused
+  default: standard
+  enable:
+    - bodyclose        # HTTP レスポンスボディの閉じ忘れ(M4 以降で効く)
+    - errorlint        # %w によるラップ、errors.Is/As の使い分け
+    - gocritic
+    - gosec            # 秘匿情報を扱うため、既定より厳しく見る
+    - misspell
+    - noctx            # context なしの HTTP / DB 呼び出し
+    - revive
+    - rowserrcheck     # rows.Err() の確認漏れ
+    - sqlclosecheck    # rows / stmt の閉じ忘れ
+    - unconvert
+    - unparam
+
+  settings:
+    errcheck:
+      # エラーは握りつぶさない(AGENTS.md コーディング規約)。
+      check-type-assertions: true
+      check-blank: true
+    gosec:
+      excludes:
+        # G104 は errcheck と重複する。
+        - G104
+
+  exclusions:
+    rules:
+      # テストでは Close のエラーを個別に検査しない。
+      #
+      # gosec はここで除外しない。テストコードこそ math/rand(G404)に手が
+      # 伸びやすく、そこからコピーされて本体に入る。暗号レイヤー(M2)の前に
+      # 効かせておく必要がある。
+      - path: _test\.go$
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
