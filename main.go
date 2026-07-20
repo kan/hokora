@@ -22,10 +22,11 @@ Server commands:
   init            initialize the database
   gen-key         generate a new master key and print it (does not touch the database)
   serve           run the server (starts sealed)
-  unseal          unseal the server (master key is read from stdin)
+  unseal --stdin  unseal the server (master key is read from stdin)
   seal            seal the server
   status          show the server status
-  rotate-master   rotate the master key
+  rotate-master --stdin
+                  rotate the master key (current and new key are read from stdin)
 
 Client commands:
   get <KEY>       print a single secret value to stdout
@@ -49,7 +50,19 @@ func run(ctx context.Context, args []string) error {
 	switch cmd {
 	case "init":
 		return cmdInit(ctx, rest)
-	case "gen-key", "serve", "unseal", "seal", "status", "rotate-master", "get", "run":
+	case "gen-key":
+		return cmdGenKey(ctx, rest)
+	case "serve":
+		return cmdServe(ctx, rest)
+	case "unseal":
+		return cmdUnseal(ctx, rest)
+	case "seal":
+		return cmdSeal(ctx, rest)
+	case "status":
+		return cmdStatus(ctx, rest)
+	case "rotate-master":
+		return cmdRotateMaster(ctx, rest)
+	case "get", "run":
 		return fmt.Errorf("%s: %w", cmd, errNotImplemented)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
