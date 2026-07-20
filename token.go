@@ -2,9 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"errors"
-	"strings"
 	"sync"
 	"time"
 )
@@ -63,11 +61,7 @@ func newTokenStore(maxTokens int) *tokenStore {
 
 // GenerateToken は新しいトークンを生成し、生の値と base64url 表現を返す。
 func GenerateToken() (raw []byte, encoded string, err error) {
-	raw, err = randomBytes(TokenBytes)
-	if err != nil {
-		return nil, "", err
-	}
-	return raw, base64.RawURLEncoding.EncodeToString(raw), nil
+	return generateRandomToken(TokenBytes)
 }
 
 // DecodeToken は base64url のトークンを生バイト列に戻す。
@@ -75,21 +69,9 @@ func GenerateToken() (raw []byte, encoded string, err error) {
 // 長さが違うものはここで落とす。**存在しないトークンとして扱うのではなく
 // 形式エラーにする**のは、store の lookup に到達させないためである
 // (到達させても害はないが、無駄な計算をさせる口を残さない)。
-//
-// **CR / LF は自分で弾く。** encoding/base64 のデコーダは入力中の改行を黙って
-// 読み飛ばす(Strict() が見るのは末尾の余りビットだけ)。DecodeMasterKey で
-// 同じ罠を踏んでいるので、こちらにも同じ手当てを入れる。同一のトークンに
-// 複数の表現が存在する状態を作らない。
 func DecodeToken(encoded string) ([]byte, error) {
-	if strings.ContainsAny(encoded, "\r\n") {
-		return nil, ErrInvalidToken
-	}
-	raw, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
-	if err != nil {
-		return nil, ErrInvalidToken
-	}
-	if len(raw) != TokenBytes {
-		Zero(raw)
+	raw, ok := decodeFixedLengthToken(encoded, TokenBytes)
+	if !ok {
 		return nil, ErrInvalidToken
 	}
 	return raw, nil

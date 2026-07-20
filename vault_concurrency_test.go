@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -598,4 +599,221 @@ func TestRevocationIsFailOpen(t *testing.T) {
 			t.Error("the token survived a rotation that could not be audited")
 		}
 	})
+}
+
+// C9: **password_change と旧パスワードによるログインを並行実行し、変更後に
+// 旧パスワード由来の有効セッションが存在しないことを確認する**(DESIGN §4.4)。
+//
+// argon2 の検証には数百 ms かかる。その間にパスワードが変更されると、
+// 次の並びで旧パスワード由来のセッションが生き残る:
+//
+//	login:  旧 password_hash を読み、argon2 検証(数百 ms)
+//	change: hash 更新 + 全 session DELETE + 監査を tx で commit
+//	login:  新 session を INSERT           ← 削除をすり抜けた
+//
+// **競合ウィンドウが machine 側(C8)より現実的に広い**のは、argon2 の
+// 所要時間がそのまま窓になるためである。
+func TestC9PasswordChangeDoesNotRaceLogin(t *testing.T) {
+	t.Parallel()
+
+	const rounds = 2
+	for round := range rounds {
+		store := newTestStore(t)
+		userID := newTestUser(t, store)
+
+		const logins = 6
+		var (
+			wg       sync.WaitGroup
+			mu       sync.Mutex
+			tokens   []string
+			start    = make(chan struct{})
+			nextPass = fmt.Sprintf("rotated-password-%d", round)
+		)
+
+		for range logins {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				// **旧パスワードでログインを試みる。**
+				res, err := Login(t.Context(), store.DB(), "admin", testPassword, "10.8.0.9", vaultNow)
+				if err != nil {
+					return // 変更が先に確定した。正常。
+				}
+				mu.Lock()
+				tokens = append(tokens, res.Token)
+				mu.Unlock()
+			}()
+		}
+
+		changeDone := make(chan struct{})
+		go func() {
+			defer close(changeDone)
+			<-start
+			if _, err := ChangePassword(t.Context(), store.DB(), discardLogger(), userID,
+				testPassword, nextPass, userAudit(userID, "10.8.0.9", vaultNow)); err != nil {
+				t.Errorf("ChangePassword: %v", err)
+			}
+		}()
+
+		close(start)
+		wg.Wait()
+		<-changeDone
+
+		// **旧パスワード由来のセッションが 1 つも有効でないこと。**
+		for _, token := range tokens {
+			raw, err := DecodeSessionToken(token)
+			if err != nil {
+				t.Fatalf("decode session token: %v", err)
+			}
+			if _, err := LookupSession(t.Context(), store.DB(), raw, vaultNow); err == nil {
+				t.Fatalf("round %d: a session created with the old password is still valid", round)
+			}
+		}
+
+		// 変更そのものは成功している(競合で巻き戻っていない)。
+		if _, err := Login(t.Context(), store.DB(), "admin", nextPass, "10.8.0.9", vaultNow); err != nil {
+			t.Fatalf("round %d: the new password does not work: %v", round, err)
+		}
+	}
+}
+
+// C9 の隣接ケース: **同じユーザーへの password_change を 2 つ並行実行する。**
+//
+// 変更側は `UPDATE ... WHERE id = ? AND password_hash = ?`(検証に使ったハッシュ)
+// + requireOneRow で決着する。この条件を落とすと、後から commit した方が
+// 先の変更を黙って上書きし、**利用者が知らないパスワードが有効になる**
+// (そして先勝ち側は「変更した」と思っている)。
+func TestConcurrentPasswordChangesAllowOnlyOneWinner(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	userID := newTestUser(t, store)
+
+	next := [2]string{"rotated-password-alpha", "rotated-password-bravo"}
+	var (
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		start  = make(chan struct{})
+		winner = -1
+		tokens = map[int]string{}
+	)
+
+	for i := range next {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			token, err := ChangePassword(t.Context(), store.DB(), discardLogger(), userID,
+				testPassword, next[i], userAudit(userID, "10.8.0.9", vaultNow))
+			if err != nil {
+				return // 先に確定した方に負けた。正常。
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if winner >= 0 {
+				t.Errorf("both password changes succeeded (%q and %q)", next[winner], next[i])
+			}
+			winner = i
+			tokens[i] = token
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if winner < 0 {
+		t.Fatal("neither password change succeeded")
+	}
+
+	// **勝った方のパスワードだけが有効。** 負けた方は保存されていない。
+	var stored string
+	if err := store.DB().QueryRowContext(t.Context(),
+		`SELECT password_hash FROM users WHERE id = ?`, userID).Scan(&stored); err != nil {
+		t.Fatalf("select password hash: %v", err)
+	}
+	ok, err := VerifyPassword(t.Context(), stored, next[winner])
+	if err != nil || !ok {
+		t.Fatalf("the winning password does not verify (ok=%v err=%v)", ok, err)
+	}
+	// 勝者のセッションは有効(自分を締め出さない)。
+	raw, err := DecodeSessionToken(tokens[winner])
+	if err != nil {
+		t.Fatalf("DecodeSessionToken: %v", err)
+	}
+	if _, err := LookupSession(t.Context(), store.DB(), raw, vaultNow); err != nil {
+		t.Errorf("the winner's new session is not valid: %v", err)
+	}
+}
+
+// **password_change と user.disable を並行実行しても、無効化されたユーザーで
+// 使えるセッションは残らない。**
+//
+// 変更側の argon2(数百 ms)は C9 と同じ競合ウィンドウであり、その間に
+// 無効化が確定しうる。ここで見るのは「どちらが勝つか」ではなく、
+// **緊急遮断(disable)の結果が競合で覆らないこと**である。
+func TestPasswordChangeDoesNotRaceUserDisable(t *testing.T) {
+	t.Parallel()
+
+	const rounds = 2
+	for round := range rounds {
+		store := newTestStore(t)
+		userID := newTestUser(t, store)
+		existing := newTestSession(t, store, userID)
+
+		var (
+			wg    sync.WaitGroup
+			start = make(chan struct{})
+			token string
+		)
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			// エラーはどちらでもよい(無効化が先なら失敗する)。
+			token, _ = ChangePassword(t.Context(), store.DB(), discardLogger(), userID,
+				testPassword, fmt.Sprintf("rotated-password-%d", round),
+				userAudit(userID, "10.8.0.9", vaultNow))
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := DisableUser(t.Context(), store.DB(), discardLogger(), userID,
+				auditCtx{Actor: ActorAnonymous, Now: vaultNow}); err != nil {
+				t.Errorf("DisableUser: %v", err)
+			}
+		}()
+		close(start)
+		wg.Wait()
+
+		// 無効化は覆らない。
+		var disabled int
+		if err := store.DB().QueryRowContext(t.Context(),
+			`SELECT disabled FROM users WHERE id = ?`, userID).Scan(&disabled); err != nil {
+			t.Fatalf("select user: %v", err)
+		}
+		if disabled != 1 {
+			t.Fatalf("round %d: the user is no longer disabled", round)
+		}
+
+		// 既存セッションも、変更側が作ったセッションも使えない。
+		if _, err := LookupSession(t.Context(), store.DB(), existing, vaultNow); err == nil {
+			t.Errorf("round %d: an existing session survived the disable", round)
+		}
+		if token != "" {
+			raw, err := DecodeSessionToken(token)
+			if err != nil {
+				t.Fatalf("DecodeSessionToken: %v", err)
+			}
+			if _, err := LookupSession(t.Context(), store.DB(), raw, vaultNow); err == nil {
+				t.Errorf("round %d: a session created during the disable is usable", round)
+			}
+		}
+		// ログインもできない(どちらのパスワードでも)。
+		for _, pw := range []string{testPassword, fmt.Sprintf("rotated-password-%d", round)} {
+			if _, err := Login(t.Context(), store.DB(), testUsername, pw, "10.8.0.9", vaultNow); err == nil {
+				t.Errorf("round %d: a disabled user could log in", round)
+			}
+		}
+	}
 }
