@@ -234,7 +234,9 @@ M4 は「Machine API・認証・ネットワーク境界」に集中する。
 - トークンで `/v1/secrets` から secret 群が取得できる
 - **15 分後にトークンが無効になる**(`Lookup()` の期限検査)
 - **grant のない environment へのアクセスが 403**
-- **machine を disable すると、既存トークンでも即座に 403**
+- **machine を disable すると、既存トークンでも即座に拒否される。**
+  正規の `DisableMachine` は C8 によりトークンを削除するので **401**、
+  トークンが残る経路(DB を直接更新した場合等)では §4.5 の再検査で **403**
 - **grant を削除すると、既存トークンでも即座に 403**
 - **project / environment を論理削除すると、配下の secret が
   Machine API から取得できなくなる**(THREAT_MODEL §11.1)
@@ -262,8 +264,12 @@ M4 は「Machine API・認証・ネットワーク境界」に集中する。
 - **bulk fetch の監査が 1 トランザクションで N 行 INSERT される**
 - **監査ログの記録が失敗したら secret を返さない**(fail closed)
 - **監査 DB 障害時、認証は必ず拒否される**(fail closed)
-- **`machine.disable` / `grant.delete` は監査失敗でも実行される**(fail open)
+- **`machine.disable` は監査失敗でも実行される**(fail open)
 - **`machine.rotate_secret` は監査失敗でも実行される**(fail open)
+- **`grant.delete` は M5 で実装する。** grant の CRUD は M5 の画面の成果物で
+  あり、DESIGN §7.5 でも「§4.5 の再検査で即座に効く / 並行制御は不要」と
+  されている。M4 に `machine.disable` / `rotate_secret` を前倒ししたのは
+  C8(トークン発行との競合)が絡むためで、その理由は grant には無い
 - **`/v1/secrets/{key}` に version パラメータが存在しない**
 - **`/healthz` がバージョン文字列を返さない**
 - **存在しない client_id での認証失敗が、actor `anonymous` +

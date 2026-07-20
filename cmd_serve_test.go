@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -37,6 +38,9 @@ func TestRunServerAbortsWhenMlockallFails(t *testing.T) {
 	err := runServer(t.Context(), serveOptions{
 		dbPath:      newServedDB(t),
 		adminSocket: socket,
+		machineAddr: "127.0.0.1:0",
+		uiAddr:      "127.0.0.1:0",
+		tlsDir:      newTestTLSDir(t),
 		lockMemory:  func() error { return wantErr },
 		logger:      discardLogger(),
 	})
@@ -54,6 +58,8 @@ func TestRunServerStartsSealedAndShutsDown(t *testing.T) {
 	t.Parallel()
 
 	socket := filepath.Join(t.TempDir(), "admin.sock")
+	dbPath := newServedDB(t)
+	tlsDir := newTestTLSDir(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -61,10 +67,13 @@ func TestRunServerStartsSealedAndShutsDown(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- runServer(ctx, serveOptions{
-			dbPath:      newServedDB(t),
+			dbPath:      dbPath,
 			adminSocket: socket,
+			machineAddr: "127.0.0.1:0",
+			uiAddr:      "127.0.0.1:0",
+			tlsDir:      tlsDir,
 			lockMemory:  func() error { return nil },
-			ready:       func() { close(ready) },
+			ready:       func(serverAddrs) { close(ready) },
 			logger:      discardLogger(),
 		})
 	}()
@@ -111,6 +120,9 @@ func TestRunServerRejectsUninitializedDatabase(t *testing.T) {
 	err := runServer(t.Context(), serveOptions{
 		dbPath:      filepath.Join(t.TempDir(), "empty.db"),
 		adminSocket: filepath.Join(t.TempDir(), "admin.sock"),
+		machineAddr: "127.0.0.1:0",
+		uiAddr:      "127.0.0.1:0",
+		tlsDir:      newTestTLSDir(t),
 		lockMemory:  func() error { return nil },
 		logger:      discardLogger(),
 	})
@@ -137,7 +149,8 @@ func TestShutdownSealsTheVault(t *testing.T) {
 
 	breakAuditTable(t, store)
 
-	if err := shutdown(&http.Server{ReadHeaderTimeout: time.Second}, v, discardLogger()); err != nil {
+	servers := []*http.Server{{ReadHeaderTimeout: time.Second}}
+	if err := shutdown(servers, v, discardLogger()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 	if got := v.Status(); got.State != StateSealed {
@@ -293,6 +306,146 @@ func TestReadStdinLimited(t *testing.T) {
 			}
 			if string(got) != tt.want {
 				t.Errorf("readStdinLimited = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// SIGHUP が証明書リロードの契機として配線されていること(DESIGN §3.7)。
+//
+// **リロードそのものの挙動は server_test.go の certReloader のテストが見る。**
+// ここで確かめるのは「シグナルが届くか」だけである。
+func TestNotifySIGHUP(t *testing.T) {
+	// シグナルはプロセス全体に届くので、並列にしない。
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ch := notifySIGHUP(ctx)
+
+	if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+		t.Fatalf("send SIGHUP: %v", err)
+	}
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SIGHUP did not reach the reload channel")
+	}
+
+	// 連続して送っても詰まらない(取りこぼしてよい設計である)。
+	for range 5 {
+		if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+			t.Fatalf("send SIGHUP: %v", err)
+		}
+	}
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a burst of SIGHUP did not reach the reload channel")
+	}
+}
+
+// 証明書が無ければ起動しない。listener を張ってから気付くのでは遅い。
+func TestRunServerRequiresACertificate(t *testing.T) {
+	t.Parallel()
+
+	err := runServer(t.Context(), serveOptions{
+		dbPath:      newServedDB(t),
+		adminSocket: filepath.Join(t.TempDir(), "admin.sock"),
+		machineAddr: "127.0.0.1:0",
+		uiAddr:      "127.0.0.1:0",
+		tlsDir:      t.TempDir(), // 空
+		lockMemory:  func() error { return nil },
+		logger:      discardLogger(),
+	})
+	if err == nil {
+		t.Fatal("runServer started without a tls key pair")
+	}
+}
+
+// **配線そのものを、実際の 2 ポートへの接続で検証する。**
+//
+// server_test.go の TestMuxSeparation は mux を個別に組み直して検証しており、
+// 「どの mux をどの listener に渡したか」は見ていない。startListeners の
+// specs を取り違える(コピペで machineMux を両方に渡す)と、そこは素通りする。
+// **これは AGENTS.md 冒頭の教訓そのものの再現経路である。**
+func TestRunServerWiresEachMuxToItsOwnListener(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ready := make(chan serverAddrs, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- runServer(ctx, serveOptions{
+			dbPath:      newServedDB(t),
+			adminSocket: filepath.Join(t.TempDir(), "admin.sock"),
+			machineAddr: "127.0.0.1:0",
+			uiAddr:      "127.0.0.1:0",
+			tlsDir:      newTestTLSDir(t),
+			lockMemory:  func() error { return nil },
+			ready:       func(a serverAddrs) { ready <- a },
+			logger:      discardLogger(),
+		})
+	}()
+
+	var addrs serverAddrs
+	select {
+	case addrs = <-ready:
+	case err := <-done:
+		t.Fatalf("runServer returned before it was ready: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("runServer did not become ready")
+	}
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	if addrs.Machine == addrs.UI {
+		t.Fatalf("both listeners bound to %s", addrs.Machine)
+	}
+
+	// 自己署名証明書なので、テスト用に検証を通す CA として自分自身を積む。
+	client := newTestTLSClient(t, addrs)
+
+	tests := []struct {
+		name string
+		addr string
+		path string
+		want int
+	}{
+		// Machine API listener
+		{"machine api serves healthz", addrs.Machine, "/healthz", http.StatusOK},
+		{"machine api serves secrets", addrs.Machine, "/v1/secrets", http.StatusUnauthorized},
+		{"machine api does not serve the ui", addrs.Machine, "/ui/login", http.StatusNotFound},
+		{"machine api does not serve the admin socket", addrs.Machine, "/status", http.StatusNotFound},
+
+		// **Web UI listener で /v1/* と /healthz が 404**(M4 完了条件)。
+		{"web ui does not serve secrets", addrs.UI, "/v1/secrets", http.StatusNotFound},
+		{"web ui does not serve healthz", addrs.UI, "/healthz", http.StatusNotFound},
+		{"web ui does not serve the admin socket", addrs.UI, "/status", http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet,
+				"https://"+tt.addr+tt.path, nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("get %s: %v", tt.path, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != tt.want {
+				t.Errorf("%s%s = %d, want %d", tt.addr, tt.path, resp.StatusCode, tt.want)
+			}
+			// 全レスポンスに no-store(ミドルウェアが両 listener に付く)。
+			if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+				t.Errorf("%s%s: Cache-Control = %q, want no-store", tt.addr, tt.path, got)
 			}
 		})
 	}

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -420,4 +422,180 @@ func TestVaultLookupTokenChecksExpiry(t *testing.T) {
 	if _, ok := v.LookupToken(raw, expiresAt); ok {
 		t.Error("an expired token was accepted (expiry must not depend on sweep)")
 	}
+}
+
+// C8 の実配線版: **実際の credential 検証と rotate_secret / disable を並行実行する。**
+//
+// vault_concurrency_test.go の TestVaultC8... は Vault のロック構造だけを見る
+// モックだった。こちらは auth.go の DisableMachine / RotateMachineSecret を
+// 通し、**旧 credential で得たトークンが失効後に 1 つも残らない**ことを見る。
+//
+// rotate_secret は「漏洩したから回す」操作である。まさに攻撃者が旧 credential
+// を持っている状況で実行されるため、すり抜けは緩和策そのものを破る。
+func TestC8RevocationWithRealCredentials(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		revoke func(t *testing.T, f *apiFixture) error
+	}{
+		{"rotate_secret", func(t *testing.T, f *apiFixture) error {
+			_, err := RotateMachineSecret(t.Context(), f.vault, f.machineID,
+				auditCtx{Actor: ActorAnonymous, Now: vaultNow})
+			return err
+		}},
+		{"disable", func(t *testing.T, f *apiFixture) error {
+			return DisableMachine(t.Context(), f.vault, f.machineID,
+				auditCtx{Actor: ActorAnonymous, Now: vaultNow})
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newAPIFixture(t)
+
+			const authenticators = 24
+			var (
+				wg     sync.WaitGroup
+				mu     sync.Mutex
+				tokens []string
+				start  = make(chan struct{})
+			)
+			for range authenticators {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					<-start
+					w := f.do(t, http.MethodPost, "/v1/auth/token", "",
+						authTokenRequest{ClientID: f.clientID, ClientSecret: f.secret})
+					if w.Code != http.StatusOK {
+						return // 失効後の試行。正常。
+					}
+					var resp authTokenResponse
+					if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+						t.Errorf("decode token: %v", err)
+						return
+					}
+					mu.Lock()
+					tokens = append(tokens, resp.Token)
+					mu.Unlock()
+				}()
+			}
+
+			revokeDone := make(chan struct{})
+			go func() {
+				defer close(revokeDone)
+				<-start
+				if err := tt.revoke(t, f); err != nil {
+					t.Errorf("revoke: %v", err)
+				}
+			}()
+
+			close(start)
+			wg.Wait()
+			<-revokeDone
+
+			// **旧 credential 由来のトークンが 1 つも有効でないこと。**
+			for _, token := range tokens {
+				raw, err := DecodeToken(token)
+				if err != nil {
+					t.Fatalf("decode token: %v", err)
+				}
+				if _, ok := f.vault.LookupToken(raw, vaultNow); ok {
+					t.Fatal("a token issued with the revoked credential is still valid")
+				}
+				// API 経由でも弾かれること。
+				if w := f.do(t, http.MethodGet, secretsPath(testProjectSlug, testEnvSlug), token, nil); w.Code == http.StatusOK {
+					t.Fatal("a token issued with the revoked credential still reads secrets")
+				}
+			}
+		})
+	}
+}
+
+// rotate_secret の後、**旧 client_secret では認証できず、新しい方では通る**。
+func TestRotateMachineSecretReplacesTheCredential(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	oldSecret := f.secret
+
+	newSecret, err := RotateMachineSecret(t.Context(), f.vault, f.machineID,
+		auditCtx{Actor: ActorAnonymous, Now: vaultNow})
+	if err != nil {
+		t.Fatalf("RotateMachineSecret: %v", err)
+	}
+	if newSecret == oldSecret {
+		t.Fatal("the rotated secret is identical to the old one")
+	}
+
+	if w := f.do(t, http.MethodPost, "/v1/auth/token", "",
+		authTokenRequest{ClientID: f.clientID, ClientSecret: oldSecret}); w.Code != http.StatusUnauthorized {
+		t.Errorf("auth with the old secret = %d, want 401", w.Code)
+	}
+	if w := f.do(t, http.MethodPost, "/v1/auth/token", "",
+		authTokenRequest{ClientID: f.clientID, ClientSecret: newSecret}); w.Code != http.StatusOK {
+		t.Errorf("auth with the new secret = %d, want 200 (body %q)", w.Code, w.Body.String())
+	}
+}
+
+// **machine.disable / rotate_secret は監査失敗でも実行される**(fail open)。
+// 緊急遮断操作を監査 DB の障害で止めてはならない(THREAT_MODEL §10.4)。
+func TestRevocationIsFailOpen(t *testing.T) {
+	t.Parallel()
+
+	t.Run("disable", func(t *testing.T) {
+		t.Parallel()
+
+		f := newAPIFixture(t)
+		token := f.token(t)
+		breakAuditTable(t, f.store)
+
+		if err := DisableMachine(t.Context(), f.vault, f.machineID,
+			auditCtx{Actor: ActorAnonymous, Now: vaultNow}); err != nil {
+			t.Fatalf("DisableMachine with a broken audit table: %v", err)
+		}
+
+		raw, err := DecodeToken(token)
+		if err != nil {
+			t.Fatalf("decode token: %v", err)
+		}
+		if _, ok := f.vault.LookupToken(raw, vaultNow); ok {
+			t.Error("the token survived a disable that could not be audited")
+		}
+		active, err := MachineIsActive(t.Context(), f.store.DB(), f.machineID)
+		if err != nil {
+			t.Fatalf("MachineIsActive: %v", err)
+		}
+		if active {
+			t.Error("the machine was not disabled")
+		}
+	})
+
+	t.Run("rotate_secret", func(t *testing.T) {
+		t.Parallel()
+
+		f := newAPIFixture(t)
+		token := f.token(t)
+		breakAuditTable(t, f.store)
+
+		newSecret, err := RotateMachineSecret(t.Context(), f.vault, f.machineID,
+			auditCtx{Actor: ActorAnonymous, Now: vaultNow})
+		if err != nil {
+			t.Fatalf("RotateMachineSecret with a broken audit table: %v", err)
+		}
+		if newSecret == "" {
+			t.Error("no new secret was returned")
+		}
+
+		raw, err := DecodeToken(token)
+		if err != nil {
+			t.Fatalf("decode token: %v", err)
+		}
+		if _, ok := f.vault.LookupToken(raw, vaultNow); ok {
+			t.Error("the token survived a rotation that could not be audited")
+		}
+	})
 }

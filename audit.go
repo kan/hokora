@@ -161,11 +161,12 @@ func subjectDigest(input string) string {
 // M5 で Web UI 経路(actor = user:N、remote_addr あり)が加わると、この
 // 組み合わせは更に増える。
 type auditCtx struct {
-	Actor       string
-	ActorUserID *int64
-	Via         string
-	RemoteAddr  *string
-	Now         time.Time
+	Actor          string
+	ActorUserID    *int64
+	ActorMachineID *int64
+	Via            string
+	RemoteAddr     *string
+	Now            time.Time
 }
 
 // socketAudit は admin socket 経由の操作の監査コンテキストである。
@@ -192,14 +193,26 @@ func (c auditCtx) entry(action Action, result Result, detail *AuditDetail) Audit
 		d.Via = &via
 	}
 	return AuditEntry{
-		At:          c.Now,
-		Actor:       c.Actor,
-		ActorUserID: c.ActorUserID,
-		Action:      action,
-		Result:      result,
-		RemoteAddr:  c.RemoteAddr,
-		Detail:      &d,
+		At:             c.Now,
+		Actor:          c.Actor,
+		ActorUserID:    c.ActorUserID,
+		ActorMachineID: c.ActorMachineID,
+		Action:         action,
+		Result:         result,
+		RemoteAddr:     c.RemoteAddr,
+		Detail:         &d,
 	}
+}
+
+// machineEntry は machine を対象とする成功の監査行を作る。
+//
+// target_machine_id は immutable な ID であり、client_id(再利用されうる)
+// では追跡できない(THREAT_MODEL §10.2)。付け忘れる余地を無くすため、
+// 呼び出し側でフィールドを埋めさせない。
+func (c auditCtx) machineEntry(action Action, machineID int64) AuditEntry {
+	entry := c.entry(action, ResultSuccess, nil)
+	entry.TargetMachineID = &machineID
+	return entry
 }
 
 // execer は *sql.DB と *sql.Tx の共通部分である。
