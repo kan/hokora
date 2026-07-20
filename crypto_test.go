@@ -895,3 +895,98 @@ func TestErrorMessagesDoNotLeakSecrets(t *testing.T) {
 		})
 	}
 }
+
+// ---- 固定長トークンの符号化(crypto.go) ----
+
+// generateRandomToken は machine token / セッショントークンの共通生成口である。
+// **両方の呼び出し側が同じ性質に依存している**ので、共通側で固定する。
+func TestGenerateRandomToken(t *testing.T) {
+	t.Parallel()
+
+	for _, n := range []int{TokenBytes, SessionTokenBytes, 16} {
+		raw, encoded, err := generateRandomToken(n)
+		if err != nil {
+			t.Fatalf("generateRandomToken(%d): %v", n, err)
+		}
+		if len(raw) != n {
+			t.Errorf("raw length = %d, want %d", len(raw), n)
+		}
+		// **パディングなしの base64url。** Cookie / ヘッダにそのまま載せる。
+		if strings.ContainsAny(encoded, "=+/") {
+			t.Errorf("encoded = %q, want unpadded base64url", encoded)
+		}
+		// 符号化と復号が対であること(片方だけ変えると、発行したトークンが
+		// 二度と検証できなくなる)。
+		got, ok := decodeFixedLengthToken(encoded, n)
+		if !ok || !bytes.Equal(got, raw) {
+			t.Errorf("round trip failed: ok=%v got=%x want=%x", ok, got, raw)
+		}
+
+		// **毎回異なる**(crypto/rand。AGENTS.md ルール 2)。
+		other, otherEncoded, err := generateRandomToken(n)
+		if err != nil {
+			t.Fatalf("generateRandomToken(%d): %v", n, err)
+		}
+		if bytes.Equal(raw, other) || encoded == otherEncoded {
+			t.Errorf("two tokens of %d bytes are identical", n)
+		}
+	}
+}
+
+// decodeFixedLengthToken は DecodeToken / DecodeSessionToken の実体である。
+//
+// 個々の呼び出し側にもテストはあるが、**この関数を直接固定しておかないと、
+// 3 つ目の呼び出し側を足したときに同じ罠(CR/LF・長さ不一致)を再現しても
+// 気付けない**(AGENTS.md の教訓)。
+func TestDecodeFixedLengthToken(t *testing.T) {
+	t.Parallel()
+
+	raw := bytes.Repeat([]byte{0x5a}, 32)
+	encoded := base64.RawURLEncoding.EncodeToString(raw)
+	short := base64.RawURLEncoding.EncodeToString(raw[:31])
+	long := base64.RawURLEncoding.EncodeToString(append(bytes.Clone(raw), 0x00))
+
+	tests := []struct {
+		name string
+		in   string
+		n    int
+		want bool
+	}{
+		{name: "canonical", in: encoded, n: 32, want: true},
+		{name: "empty", in: "", n: 32},
+		{name: "not base64", in: strings.Repeat("!", 43), n: 32},
+		// **標準 base64 は受け付けない。** 別の表現を作らせない。
+		{name: "padded", in: base64.URLEncoding.EncodeToString(raw), n: 32},
+		{name: "standard alphabet", in: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{0xfb}, 32)), n: 32},
+		// **長さが違うものは弾く。** 短いトークンを通すと、総当たりの空間が縮む。
+		{name: "one byte short", in: short, n: 32},
+		{name: "one byte long", in: long, n: 32},
+		{name: "right value, wrong expected length", in: encoded, n: 16},
+		// **CR / LF は黙って読み飛ばされる**(Strict() でも変わらない)。
+		{name: "trailing newline", in: encoded + "\n", n: 32},
+		{name: "trailing crlf", in: encoded + "\r\n", n: 32},
+		{name: "embedded newline", in: encoded[:10] + "\n" + encoded[10:], n: 32},
+		{name: "leading newline", in: "\n" + encoded, n: 32},
+		{name: "embedded cr", in: encoded[:10] + "\r" + encoded[10:], n: 32},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := decodeFixedLengthToken(tt.in, tt.n)
+			if ok != tt.want {
+				t.Fatalf("ok = %v, want %v", ok, tt.want)
+			}
+			if !ok {
+				if got != nil {
+					t.Errorf("bytes were returned alongside a failure: %x", got)
+				}
+				return
+			}
+			if len(got) != tt.n {
+				t.Errorf("length = %d, want %d", len(got), tt.n)
+			}
+		})
+	}
+}

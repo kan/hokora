@@ -178,6 +178,17 @@ func socketAudit(now time.Time) auditCtx {
 	return auditCtx{Actor: ActorAnonymous, Via: ViaSocket, Now: now}
 }
 
+// remoteAddr は送信元アドレスを返す(未設定なら空文字)。
+//
+// **同じ値を別引数でも受け取らない。** 二重に渡せるようにすると、監査行と
+// セッション行で食い違った送信元が記録されうる。
+func (c auditCtx) remoteAddr() string {
+	if c.RemoteAddr == nil {
+		return ""
+	}
+	return *c.RemoteAddr
+}
+
 // entry は監査コンテキストから 1 行を組み立てる。
 //
 // **detail は値でコピーしてから触る。** 呼び出し側の構造体を書き換えると、
@@ -212,6 +223,13 @@ func (c auditCtx) entry(action Action, result Result, detail *AuditDetail) Audit
 func (c auditCtx) machineEntry(action Action, machineID int64) AuditEntry {
 	entry := c.entry(action, ResultSuccess, nil)
 	entry.TargetMachineID = &machineID
+	return entry
+}
+
+// userEntry は user を対象とする成功の監査行を作る。machineEntry の対である。
+func (c auditCtx) userEntry(action Action, userID int64) AuditEntry {
+	entry := c.entry(action, ResultSuccess, nil)
+	entry.TargetUserID = &userID
 	return entry
 }
 

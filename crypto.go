@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"strings"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -211,6 +212,45 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 		return nil, fmt.Errorf("new gcm: %w", err)
 	}
 	return gcm, nil
+}
+
+// ---- 固定長トークンの符号化 ----
+
+// generateRandomToken は n バイトの乱数と、その base64url 表現を返す。
+//
+// machine token / セッショントークン / client_secret が同じ形をしているので、
+// 生成もデコードもここに集約する。
+func generateRandomToken(n int) (raw []byte, encoded string, err error) {
+	raw, err = randomBytes(n)
+	if err != nil {
+		return nil, "", err
+	}
+	return raw, base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// decodeFixedLengthToken は base64url を n バイトへ戻す。長さが違えば失敗する。
+//
+// **CR / LF をここで弾く。** encoding/base64 のデコーダは入力中の改行を黙って
+// 読み飛ばし(Strict() でも変わらない)、1 つのトークンに複数の表現が生まれる。
+// この罠は MK・machine token・セッショントークンの 3 箇所で同じ形で現れた。
+// **手当てを 3 回書くのではなく、1 箇所に集めて全員がそこを通るようにする**
+// (AGENTS.md の教訓「1 箇所直しても、同じ罠を次に書く自分は止まらない」)。
+//
+// エラーは呼び出し側の sentinel に翻訳させる。ここでは形式が不正であることだけを
+// 返し、値は含めない(AGENTS.md ルール 20)。
+func decodeFixedLengthToken(encoded string, n int) ([]byte, bool) {
+	if strings.ContainsAny(encoded, "\r\n") {
+		return nil, false
+	}
+	raw, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+	if err != nil {
+		return nil, false
+	}
+	if len(raw) != n {
+		Zero(raw)
+		return nil, false
+	}
+	return raw, true
 }
 
 // itemAADLen は itemAAD が返す固定長である。
