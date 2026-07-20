@@ -110,18 +110,19 @@ func TestRunWithUnknownCommand(t *testing.T) {
 	}
 }
 
-// M1 でまだ実装されていないサブコマンドは、"not implemented" であって
+// まだ実装されていないサブコマンドは、"not implemented" であって
 // "unknown command" ではないことを区別できなければならない。前者は
 // hokora 側の既知の未実装、後者は利用者の打ち間違いであり、運用者への
 // メッセージが変わる。
+//
+// M3 で serve / unseal / seal / status / rotate-master / gen-key が実装され、
+// 残るはクライアント側コマンド(M6)だけになった。
 func TestRunUnimplementedCommands(t *testing.T) {
-	for _, cmd := range []string{
-		"gen-key", "serve", "unseal", "seal", "status", "rotate-master", "get", "run",
-	} {
+	for _, cmd := range []string{"get", "run"} {
 		t.Run(cmd, func(t *testing.T) {
 			err := run(t.Context(), []string{cmd})
 			if !errors.Is(err, errNotImplemented) {
-				t.Errorf("run(%q) = %v, want it to wrap errNotImplemented", cmd, err)
+				t.Fatalf("run(%q) = %v, want it to wrap errNotImplemented", cmd, err)
 			}
 			if !strings.Contains(err.Error(), cmd) {
 				t.Errorf("error = %v, want it to name the command %q", err, cmd)
@@ -138,15 +139,20 @@ func TestRunDispatchesInitWithItsArgs(t *testing.T) {
 	path := dir + "/hokora.db"
 
 	var err error
-	stdout, _ := captureOutput(t, func() {
+	stdout, stderr := captureOutput(t, func() {
 		err = run(t.Context(), []string{"init", "-db", path})
 	})
 
 	if err != nil {
 		t.Fatalf("run([init -db %s]) = %v, want nil", path, err)
 	}
-	if !strings.Contains(stdout, path) {
-		t.Errorf("stdout = %q, want it to mention %q", stdout, path)
+	// **stdout に出るのはマスターキーだけである。** パイプで
+	// パスワードマネージャへ渡せるよう、説明文は stderr へ出す。
+	if _, err := DecodeMasterKey([]byte(stdout)); err != nil {
+		t.Errorf("stdout = %q, want a single master key: %v", stdout, err)
+	}
+	if !strings.Contains(stderr, path) {
+		t.Errorf("stderr = %q, want it to mention %q", stderr, path)
 	}
 
 	store, openErr := OpenStore(t.Context(), path)
@@ -154,4 +160,73 @@ func TestRunDispatchesInitWithItsArgs(t *testing.T) {
 		t.Fatalf("OpenStore after run(init): %v", openErr)
 	}
 	store.Close()
+}
+
+// M3 で実装されたサブコマンドが run から振り分けられていること。
+//
+// gen-key は DB に触らないので、ここで実際に動かして確認できる。**鍵は
+// stdout に、注意書きは stderr に出る**(パイプでパスワードマネージャへ
+// 渡す運用のため)。
+func TestRunDispatchesGenKey(t *testing.T) {
+	var err error
+	stdout, stderr := captureOutput(t, func() {
+		err = run(t.Context(), []string{"gen-key"})
+	})
+	if err != nil {
+		t.Fatalf("run([gen-key]) = %v, want nil", err)
+	}
+
+	mk, decodeErr := DecodeMasterKey([]byte(stdout))
+	if decodeErr != nil {
+		t.Fatalf("stdout = %q, want a single master key: %v", stdout, decodeErr)
+	}
+	if len(mk) != MasterKeyBytes {
+		t.Errorf("master key length = %d, want %d", len(mk), MasterKeyBytes)
+	}
+	if strings.Contains(stderr, strings.TrimSpace(stdout)) {
+		t.Error("stderr repeats the master key")
+	}
+	if !strings.Contains(stderr, "password manager") {
+		t.Errorf("stderr = %q, want it to tell the operator to store the key", stderr)
+	}
+}
+
+// admin socket を使うコマンドは、サーバーが居なければ接続エラーで終わる。
+// **未実装扱いにはならない**(振り分けが届いていることの確認)。
+func TestRunDispatchesAdminCommands(t *testing.T) {
+	socket := t.TempDir() + "/absent.sock"
+
+	for _, args := range [][]string{
+		{"status", "-socket", socket},
+		{"seal", "-socket", socket},
+	} {
+		t.Run(args[0], func(t *testing.T) {
+			err := run(t.Context(), args)
+			if err == nil {
+				t.Fatalf("run(%v) = nil, want a connection error", args)
+			}
+			if errors.Is(err, errNotImplemented) {
+				t.Fatalf("run(%v) reported the command as unimplemented", args)
+			}
+			if !strings.Contains(err.Error(), socket) {
+				t.Errorf("error = %v, want it to name the socket path", err)
+			}
+		})
+	}
+}
+
+// unseal / rotate-master は --stdin を明示しないと動かない。
+// MK の入力経路を stdin だけに限っていることを、フラグの形でも示す。
+func TestUnsealRequiresStdinFlag(t *testing.T) {
+	for _, cmd := range []string{"unseal", "rotate-master"} {
+		t.Run(cmd, func(t *testing.T) {
+			err := run(t.Context(), []string{cmd})
+			if err == nil {
+				t.Fatalf("run(%q) = nil, want an error", cmd)
+			}
+			if !strings.Contains(err.Error(), "--stdin") {
+				t.Errorf("error = %v, want it to require --stdin", err)
+			}
+		})
+	}
 }

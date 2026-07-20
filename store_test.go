@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -360,5 +362,135 @@ func TestForeignKeyCheckIsEmpty(t *testing.T) {
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("foreign_key_check rows: %v", err)
+	}
+}
+
+// ---- keyring(M3) ----
+
+// testKeyringRow は DB 往復の確認に使うだけの keyring 行を作る。
+// **argon2 を通さない**(暗号としての正しさは crypto_test.go / vault_test.go で見る)。
+func testKeyringRow(version int64) *Keyring {
+	at := time.Unix(1700000000, 0).UTC()
+	return &Keyring{
+		DEKWrapped: bytes.Repeat([]byte{0x11}, MasterKeyBytes+16),
+		DEKNonce:   bytes.Repeat([]byte{0x22}, nonceBytes),
+		KDFSalt:    bytes.Repeat([]byte{0x33}, kdfSaltBytes),
+		DEKVersion: version,
+		CreatedAt:  at,
+		UpdatedAt:  at,
+	}
+}
+
+func TestKeyringRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	want := testKeyringRow(InitialDEKVersion)
+	if err := InsertKeyring(t.Context(), store.DB(), want); err != nil {
+		t.Fatalf("InsertKeyring: %v", err)
+	}
+
+	got, err := LoadKeyring(t.Context(), store.DB())
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	switch {
+	case !bytes.Equal(got.DEKWrapped, want.DEKWrapped):
+		t.Errorf("dek_wrapped = %x, want %x", got.DEKWrapped, want.DEKWrapped)
+	case !bytes.Equal(got.DEKNonce, want.DEKNonce):
+		t.Errorf("dek_nonce = %x, want %x", got.DEKNonce, want.DEKNonce)
+	case !bytes.Equal(got.KDFSalt, want.KDFSalt):
+		t.Errorf("kdf_salt = %x, want %x", got.KDFSalt, want.KDFSalt)
+	case got.DEKVersion != want.DEKVersion:
+		t.Errorf("dek_version = %d, want %d", got.DEKVersion, want.DEKVersion)
+	case !got.CreatedAt.Equal(want.CreatedAt) || !got.UpdatedAt.Equal(want.UpdatedAt):
+		t.Errorf("timestamps = %v / %v, want %v", got.CreatedAt, got.UpdatedAt, want.CreatedAt)
+	}
+}
+
+// **keyring は上書きできない。** 2 度目の INSERT が通ると、既存の DEK を失い
+// 全ての secret が復号不能になる(id = 1 固定の意図)。
+func TestInsertKeyringRefusesToOverwrite(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	first := testKeyringRow(InitialDEKVersion)
+	if err := InsertKeyring(t.Context(), store.DB(), first); err != nil {
+		t.Fatalf("InsertKeyring: %v", err)
+	}
+
+	second := testKeyringRow(InitialDEKVersion)
+	second.DEKWrapped = bytes.Repeat([]byte{0x99}, MasterKeyBytes+16)
+	if err := InsertKeyring(t.Context(), store.DB(), second); err == nil {
+		t.Fatal("a second InsertKeyring succeeded")
+	}
+
+	got, err := LoadKeyring(t.Context(), store.DB())
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	if !bytes.Equal(got.DEKWrapped, first.DEKWrapped) {
+		t.Error("the existing keyring was replaced")
+	}
+}
+
+// rotate-master は **ラップだけ** を差し替える。dek_version と created_at を
+// 動かすと、item_versions の dek_version との対応が壊れる(DESIGN §6.7)。
+func TestUpdateKeyringWrapKeepsVersionAndCreatedAt(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	before := testKeyringRow(3)
+	if err := InsertKeyring(t.Context(), store.DB(), before); err != nil {
+		t.Fatalf("InsertKeyring: %v", err)
+	}
+
+	next := testKeyringRow(3)
+	next.DEKWrapped = bytes.Repeat([]byte{0xAA}, MasterKeyBytes+16)
+	next.DEKNonce = bytes.Repeat([]byte{0xBB}, nonceBytes)
+	next.KDFSalt = bytes.Repeat([]byte{0xCC}, kdfSaltBytes)
+	next.UpdatedAt = before.UpdatedAt.Add(time.Hour)
+	if err := UpdateKeyringWrap(t.Context(), store.DB(), next); err != nil {
+		t.Fatalf("UpdateKeyringWrap: %v", err)
+	}
+
+	got, err := LoadKeyring(t.Context(), store.DB())
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	switch {
+	case !bytes.Equal(got.DEKWrapped, next.DEKWrapped) || !bytes.Equal(got.DEKNonce, next.DEKNonce):
+		t.Error("the wrapped dek was not replaced")
+	case !bytes.Equal(got.KDFSalt, next.KDFSalt):
+		t.Error("the kdf salt was not replaced")
+	case got.DEKVersion != before.DEKVersion:
+		t.Errorf("dek_version = %d, want %d (unchanged)", got.DEKVersion, before.DEKVersion)
+	case !got.CreatedAt.Equal(before.CreatedAt):
+		t.Errorf("created_at = %v, want %v (unchanged)", got.CreatedAt, before.CreatedAt)
+	case !got.UpdatedAt.Equal(next.UpdatedAt):
+		t.Errorf("updated_at = %v, want %v", got.UpdatedAt, next.UpdatedAt)
+	}
+}
+
+// keyring が無い DB への UPDATE は ErrKeyringMissing になる。
+// 0 行更新を成功として返すと、rotate-master が「成功したのに何も変わって
+// いない」状態を報告してしまう。
+func TestUpdateKeyringWrapWithoutKeyring(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	if err := UpdateKeyringWrap(t.Context(), store.DB(), testKeyringRow(1)); !errors.Is(err, ErrKeyringMissing) {
+		t.Fatalf("error = %v, want ErrKeyringMissing", err)
+	}
+}
+
+// LoadKeyring は「行が無い」を ErrKeyringMissing として区別する
+// (init 前の DB を unseal しようとしたときの案内に使う)。
+func TestLoadKeyringMissing(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	if _, err := LoadKeyring(t.Context(), store.DB()); !errors.Is(err, ErrKeyringMissing) {
+		t.Fatalf("error = %v, want ErrKeyringMissing", err)
 	}
 }
