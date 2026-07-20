@@ -8,8 +8,11 @@ on:
 permissions:
   contents: read
 
-# lint / vuln のバージョンは go.mod の tool ディレクティブで固定されているため、
+# lint のバージョンは go.mod の tool ディレクティブで固定されているため、
 # ワークフロー側にバージョンを書かない。Go 自体のバージョンも go.mod が正。
+#
+# 脆弱性検査 (govulncheck) は vuln.yml に分離してある。こちらは変更起因の
+# 検査だけを担い、定期実行が要る検査は持たない。
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -42,13 +45,3 @@ jobs:
           go-version-file: go.mod
       - name: golangci-lint
         run: make lint
-
-  vuln:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      - name: govulncheck
-        run: make vuln
