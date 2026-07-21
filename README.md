@@ -1,5 +1,9 @@
 # hokora
 
+[![CI](https://github.com/kan/hokora/actions/workflows/ci.yml/badge.svg)](https://github.com/kan/hokora/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/kan/hokora/sdk.svg)](https://pkg.go.dev/github.com/kan/hokora/sdk)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 **hokora** is a minimal secret-management server for a **single organization**.
 It is written in Go and ships as a single, dependency-light binary backed by
 SQLite.
