@@ -41,17 +41,21 @@ type adminServer struct {
 	logger *slog.Logger
 
 	// unsealLimiter は unseal をグローバルに 3 回/分へ制限する(DESIGN §7.4)。
-	// argon2 を伴う操作なので、連打で 64 MB × n の確保が積み上がらないようにする。
+	//
+	// **socket と Web UI で同じインスタンスを共有する。** 設計表は経路ごと
+	// ではなく「unseal(socket / Web) 3 回/分 グローバル」と書いており、
+	// 別々に持つと片方を叩きながらもう片方も叩けてしまう。argon2 を伴う
+	// 操作なので、連打で 64 MB × n の確保が積み上がらないようにする。
 	unsealLimiter *rateLimiter
 
 	now func() time.Time
 }
 
-func newAdminServer(v *Vault, logger *slog.Logger) *adminServer {
+func newAdminServer(v *Vault, logger *slog.Logger, unsealLimiter *rateLimiter) *adminServer {
 	return &adminServer{
 		vault:         v,
 		logger:        logger,
-		unsealLimiter: newRateLimiter(unsealRate, 1),
+		unsealLimiter: unsealLimiter,
 		now:           time.Now,
 	}
 }

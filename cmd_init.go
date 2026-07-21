@@ -26,11 +26,13 @@ const (
 
 // cmdInit は DB ファイルを作成し、スキーマを適用する。
 //
-// DB を作り、スキーマを適用し、keyring を作る。**生成した MK は一度だけ
-// stdout に表示され、以後どこにも残らない**(AGENTS.md ルール 11)。
-// 初期 admin ユーザーの作成は Web UI(M5)の成果物であり、そちらで追加する。
+// DB を作り、スキーマを適用し、keyring と初期 admin を作る。
 //
-// 既存の DB に対しては、未適用のスキーマを当てるだけで keyring は触らない。
+// **生成した MK と初期パスワードは一度だけ stdout / stderr に表示され、
+// 以後どこにも残らない**(AGENTS.md ルール 11)。
+//
+// 既存の DB に対しては、未適用のスキーマを当てるだけで keyring と
+// ユーザーは触らない。
 func cmdInit(ctx context.Context, args []string) (err error) {
 	flags := flag.NewFlagSet("init", flag.ContinueOnError)
 	// エラーの体裁は main に一本化する。flag に出力させると、main が返り値の
@@ -57,9 +59,11 @@ func cmdInit(ctx context.Context, args []string) (err error) {
 		return err
 	}
 
-	// スキーマ適用後に keyring を作る。初期 admin ユーザーの作成は Web UI
-	// (M5)の成果物なので、そちらで追加する。
-	if err := ensureKeyring(ctx, store, time.Now()); err != nil {
+	now := time.Now()
+	if err := ensureKeyring(ctx, store, now); err != nil {
+		return err
+	}
+	if err := ensureInitialAdmin(ctx, store, now); err != nil {
 		return err
 	}
 
@@ -153,5 +157,43 @@ func ensureKeyring(ctx context.Context, store *Store, now time.Time) error {
 		return err
 	}
 	printMasterKey(mk)
+	return nil
+}
+
+// initialAdminUsername は初期 admin のユーザー名である。
+const initialAdminUsername = "admin"
+
+// ensureInitialAdmin はユーザーが 1 人も居なければ初期 admin を作る。
+//
+// **パスワードはサーバーが生成し、一度だけ表示する**(Q3)。
+// `must_change_pw` を立てるので、初回ログイン時に変更が求められる。
+// **パスワード変更は sealed 状態でも動く**(DESIGN §8.3)ため、
+// 「init 直後は必ず sealed」という状況でも初回セットアップが進む。
+//
+// 既にユーザーが居る DB では何もしない。
+func ensureInitialAdmin(ctx context.Context, store *Store, now time.Time) error {
+	var users int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&users); err != nil {
+		return fmt.Errorf("count users: %w", err)
+	}
+	if users > 0 {
+		return nil
+	}
+
+	password, err := generateInitialPassword()
+	if err != nil {
+		return err
+	}
+
+	ac := auditCtx{Actor: ActorAnonymous, Now: now}
+	if _, err := CreateUser(ctx, store.DB(), initialAdminUsername, password, true, ac); err != nil {
+		return err
+	}
+
+	// 鍵と同じく、控えなければ復旧手段は無い。MK と混ざらないよう stderr に出す
+	// (stdout は MK 専用にしてある)。
+	fmt.Fprintf(os.Stderr, "initial admin user: %s\ninitial password:   %s\n"+
+		"change it at the first login. hokora cannot show it again.\n",
+		initialAdminUsername, password)
 	return nil
 }

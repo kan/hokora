@@ -1,0 +1,23 @@
+{{define "content"}}
+<h1>監査ログ</h1>
+<p class="notice">直近 {{.AuditLimit}} 件を新しい順に表示しています。</p>
+
+<table class="audit">
+  <thead><tr><th>時刻</th><th>actor</th><th>action</th><th>対象</th><th>結果</th><th>送信元</th><th>詳細</th></tr></thead>
+  <tbody>
+  {{range .Audit}}
+    <tr class="{{.Result}}">
+      <td>{{formatTime .At}}</td>
+      <td>{{.Actor}}</td>
+      <td class="key">{{.Action}}</td>
+      <td>{{.Target}}</td>
+      <td>{{.Result}}</td>
+      <td>{{.RemoteAddr}}</td>
+      <td class="detail">{{.Detail}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="7" class="empty">記録がありません。</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

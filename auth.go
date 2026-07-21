@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base32"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -55,6 +57,35 @@ func GenerateClientSecret() (encoded string, hash []byte, err error) {
 	// エンコードしても変わらない。
 	encoded = base64.RawURLEncoding.EncodeToString(raw)
 	return encoded, hashClientSecret(encoded), nil
+}
+
+// clientIDLen は自動生成する client_id の長さである(base32 小文字 20 文字)。
+//
+// **slug 制約 ^[a-z0-9][a-z0-9-]{0,63}$ に収まる。** base32 の文字集合は
+// a-z2-7 で、全て slug の許可文字である。20 文字で 100 ビットの乱数から
+// 作るので、UNIQUE 制約に対する衝突は事実上起きない。
+const clientIDLen = 20
+
+// clientIDRandomBytes は 20 文字を得るのに必要な乱数バイト数である。
+// 13 バイト = 104 ビットを base32 化すると 21 文字になり、先頭 20 文字を使う。
+const clientIDRandomBytes = 13
+
+// GenerateClientID はサーバー側で client_id を生成する。
+//
+// **client_id は machine を識別するための公開値である**(secret とは違い、
+// 常時表示してよい)。ユーザーに決めさせず自動生成するのは、命名の一貫性を
+// 保ち、既存 ID との重複や打ち間違いを避けるためである。
+func GenerateClientID() (string, error) {
+	raw, err := randomBytes(clientIDRandomBytes)
+	if err != nil {
+		return "", err
+	}
+	defer Zero(raw)
+
+	// 小文字の base32(a-z2-7)にする。大文字や記号を含む base64url とは違い、
+	// これはそのまま slug として通る。
+	encoded := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw))
+	return encoded[:clientIDLen], nil
 }
 
 // hashClientSecret は提示された client_secret のハッシュを計算する。

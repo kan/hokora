@@ -189,12 +189,3 @@ func warnIfWildcardBind(addr string, logger *slog.Logger) {
 			slog.String("addr", addr))
 	}
 }
-
-// uiMuxPlaceholder は M5 まで空の Web UI mux である。
-//
-// **空でも独立した mux を用意する。** 「まだ実装がないから machineMux を
-// 流用する」を防ぐためであり、この時点で Web UI listener が /v1/... や
-// /healthz に応答しないことをテストで固定できる(DESIGN §4.1)。
-func uiMuxPlaceholder() *http.ServeMux {
-	return http.NewServeMux()
-}

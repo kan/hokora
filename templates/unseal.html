@@ -1,0 +1,9 @@
+{{define "content"}}
+<h1>unseal</h1>
+<p class="notice">サーバーは sealed です。マスターキーを入力すると secret を扱えるようになります。</p>
+<form method="post" action="/ui/unseal" class="card">
+  {{template "csrf" .CSRFToken}}
+  <label>マスターキー <input type="password" name="master_key" autocomplete="off" required autofocus></label>
+  <button type="submit">unseal する</button>
+</form>
+{{end}}

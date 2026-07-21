@@ -990,3 +990,83 @@ func TestDecodeFixedLengthToken(t *testing.T) {
 		})
 	}
 }
+
+// **decryptSecret は dek_version の不一致で別の鍵を試さない。**
+//
+// api.go と secret.go の両方から呼ばれる共通処理である。DEK ローテーション
+// (Phase 3)より前に不一致が起きたなら、それは行の取り違えかデータ破損で
+// あって、**「たまたま復号できるか試す」ことをしてはならない**。
+func TestDecryptSecret(t *testing.T) {
+	t.Parallel()
+
+	const (
+		itemID    = int64(7)
+		version   = int64(3)
+		dekVer    = InitialDEKVersion
+		plaintext = "postgres://user:" + "pw@localhost/db"
+	)
+	dek := testKey(t, 0x3C)
+
+	seal := func(t *testing.T, item, ver, dv int64) EncryptedSecret {
+		t.Helper()
+
+		aad, err := itemAAD(item, ver, dv)
+		if err != nil {
+			t.Fatalf("itemAAD: %v", err)
+		}
+		ciphertext, nonce, err := sealBytes(dek, []byte(plaintext), aad)
+		if err != nil {
+			t.Fatalf("sealBytes: %v", err)
+		}
+		return EncryptedSecret{
+			ItemID: item, Key: "DATABASE_URL", Version: ver,
+			ValueEnc: ciphertext, Nonce: nonce, DEKVersion: dv,
+		}
+	}
+
+	// 正しい組み合わせでは復号できる。
+	got, err := decryptSecret(dek, dekVer, seal(t, itemID, version, dekVer))
+	if err != nil {
+		t.Fatalf("decryptSecret: %v", err)
+	}
+	if string(got) != plaintext {
+		t.Errorf("plaintext mismatch: got %d bytes", len(got))
+	}
+
+	tests := []struct {
+		name string
+		// mutate は復号前に行の内容を書き換える(DB から読んだ値の取り違え)。
+		mutate func(s *EncryptedSecret)
+	}{
+		{"dek version mismatch", func(s *EncryptedSecret) { s.DEKVersion = dekVer + 1 }},
+		{"item id mismatch", func(s *EncryptedSecret) { s.ItemID = itemID + 1 }},
+		{"version mismatch", func(s *EncryptedSecret) { s.Version = version + 1 }},
+		{"tampered ciphertext", func(s *EncryptedSecret) { s.ValueEnc = flipByte(s.ValueEnc, 0) }},
+		{"tampered nonce", func(s *EncryptedSecret) { s.Nonce = flipByte(s.Nonce, 0) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := seal(t, itemID, version, dekVer)
+			tt.mutate(&s)
+
+			got, err := decryptSecret(dek, dekVer, s)
+			if err == nil {
+				t.Fatal("decryptSecret succeeded, want an error")
+			}
+			if got != nil {
+				t.Error("decryptSecret returned bytes along with the error")
+			}
+			// **エラーに平文や鍵を含めない**(ルール 20)。
+			if strings.Contains(err.Error(), plaintext) {
+				t.Errorf("the error message contains the plaintext: %v", err)
+			}
+		})
+	}
+
+	// 呼び出し側が渡す DEK 版が違う場合も同じく拒否する(引数の取り違え)。
+	if _, err := decryptSecret(dek, dekVer+1, seal(t, itemID, version, dekVer)); err == nil {
+		t.Error("decryptSecret accepted a stale dek version from the caller")
+	}
+}

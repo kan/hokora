@@ -253,6 +253,31 @@ func decodeFixedLengthToken(encoded string, n int) ([]byte, bool) {
 	return raw, true
 }
 
+// decryptSecret は暗号化された secret を 1 件復号する。
+//
+// **api.go と secret.go の両方から呼ぶ。** 同じ 3 手順(dek_version の確認 →
+// AAD の再構築 → open)を 2 箇所に書くと、DEK ローテーション(Phase 3)で
+// 手順が変わったときに片方だけ直る(AGENTS.md の教訓)。
+//
+// 呼び出しは Vault の read lock 内(WithDEK の中)から行うこと。
+func decryptSecret(dek []byte, dekVersion int64, s EncryptedSecret) ([]byte, error) {
+	if s.DEKVersion != dekVersion {
+		// DEK のローテーション前は起こらない。起きたならデータの取り違えなので、
+		// 黙って別の鍵を試さない。
+		return nil, fmt.Errorf("item %d version %d: dek version %d, want %d",
+			s.ItemID, s.Version, s.DEKVersion, dekVersion)
+	}
+	aad, err := itemAAD(s.ItemID, s.Version, s.DEKVersion)
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := openBytes(dek, s.Nonce, s.ValueEnc, aad)
+	if err != nil {
+		return nil, fmt.Errorf("item %d version %d: %w", s.ItemID, s.Version, err)
+	}
+	return plaintext, nil
+}
+
 // itemAADLen は itemAAD が返す固定長である。
 const itemAADLen = len(itemAADPrefix) + 8 + 4 + 4
 

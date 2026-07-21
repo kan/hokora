@@ -1,0 +1,76 @@
+{{define "content"}}
+<h1>アプリ</h1>
+
+{{if .Credential}}
+<div class="credential">
+  <h2>{{if .Credential.Rotated}}credential を再発行しました{{else}}アプリを作成しました{{end}}</h2>
+  <p class="notice">この値はここでしか表示されません。いま控えてください。</p>
+  <dl>
+    <dt>HOKORA_CLIENT_ID</dt><dd><code>{{.Credential.ClientID}}</code></dd>
+    <dt>HOKORA_CLIENT_SECRET</dt><dd><code class="plaintext">{{.Credential.ClientSecret}}</code></dd>
+  </dl>
+  <p><a href="/ui/machines">一覧へ戻る</a></p>
+</div>
+{{end}}
+
+<table class="machines">
+  <thead><tr><th>アプリ</th><th>状態</th><th>最終認証</th><th>grant</th><th>操作</th></tr></thead>
+  <tbody>
+  {{range $machine := .Machines}}
+    <tr>
+      <td>
+        <div class="app-name">{{if $machine.Name}}{{$machine.Name}}{{else}}—{{end}}</div>
+        <code class="app-id">{{$machine.ClientID}}</code>
+      </td>
+      <td>{{if $machine.Disabled}}<span class="badge danger">無効</span>{{else}}有効{{end}}</td>
+      <td class="nowrap">{{if $machine.LastAuthAt}}{{formatTime $machine.LastAuthAt}}{{else}}—{{end}}</td>
+      <td class="grants">
+        <ul class="grant-list">
+        {{range $machine.Grants}}
+          <li>
+            <span class="grant-name">{{.ProjectSlug}}/{{.EnvSlug}}</span>
+            <form method="post" action="/ui/machines/{{$machine.ID}}/grants/{{.EnvironmentID}}/delete" class="inline">
+              {{template "csrf" $.CSRFToken}}
+              <button type="submit" class="linkish danger" title="grant を削除">×</button>
+            </form>
+          </li>
+        {{end}}
+        </ul>
+        {{if $.Grantable}}
+        <form method="post" action="/ui/machines/{{$machine.ID}}/grants" class="grant-add">
+          {{template "csrf" $.CSRFToken}}
+          <select name="environment_id" required aria-label="環境を選択">
+            <option value="" disabled selected>環境を選択</option>
+            {{range $.Grantable}}<option value="{{.EnvironmentID}}">{{.ProjectSlug}} / {{.EnvSlug}}</option>{{end}}
+          </select>
+          <button type="submit">追加</button>
+        </form>
+        {{end}}
+      </td>
+      <td class="actions nowrap">
+        <form method="post" action="/ui/machines/{{$machine.ID}}/rotate" class="inline">
+          {{template "csrf" $.CSRFToken}}
+          <button type="submit">再発行</button>
+        </form>
+        {{if not $machine.Disabled}}
+        <form method="post" action="/ui/machines/{{$machine.ID}}/disable" class="inline">
+          {{template "csrf" $.CSRFToken}}
+          <button type="submit" class="danger">無効化</button>
+        </form>
+        {{end}}
+      </td>
+    </tr>
+  {{else}}
+    <tr><td colspan="5" class="empty">アプリがありません。</td></tr>
+  {{end}}
+  </tbody>
+</table>
+
+<h2>アプリを作成</h2>
+<form method="post" action="/ui/machines" class="card">
+  {{template "csrf" .CSRFToken}}
+  <label>名前 <input type="text" name="name" placeholder="例: 請求バッチ"></label>
+  <p class="hint">client_id はサーバーが自動生成します。</p>
+  <button type="submit">作成</button>
+</form>
+{{end}}

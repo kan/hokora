@@ -245,8 +245,12 @@ func TestMuxSeparation(t *testing.T) {
 
 	v, _, _ := newTestVault(t)
 	machine := newMachineAPI(v, discardLogger()).machineMux()
-	ui := uiMuxPlaceholder()
-	admin := newAdminServer(v, discardLogger()).adminMux()
+	uiServer, err := newUIServer(v, discardLogger(), newRateLimiter(unsealRate, 1))
+	if err != nil {
+		t.Fatalf("newUIServer: %v", err)
+	}
+	ui := uiServer.uiMux()
+	admin := newAdminServer(v, discardLogger(), newRateLimiter(unsealRate, 1)).adminMux()
 
 	tests := []struct {
 		name         string
@@ -261,6 +265,9 @@ func TestMuxSeparation(t *testing.T) {
 		{"machine does not serve the ui", machine, http.MethodGet, "/ui/login", true},
 		{"machine does not serve unseal", machine, http.MethodPost, "/unseal", true},
 		{"machine does not serve status", machine, http.MethodGet, "/status", true},
+
+		// Web UI listener は /ui/* を扱う。
+		{"ui serves the login form", ui, http.MethodGet, "/ui/login", false},
 
 		// **Web UI listener で /v1/auth/token と /healthz が 404**(M4 完了条件)。
 		{"ui does not serve auth token", ui, http.MethodPost, "/v1/auth/token", true},

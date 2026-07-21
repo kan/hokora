@@ -384,18 +384,9 @@ func (a *machineAPI) decryptAll(secrets []EncryptedSecret) (map[string]string, e
 	values := make(map[string]string, len(secrets))
 	err := a.vault.WithDEK(func(dek []byte, dekVersion int64) error {
 		for _, s := range secrets {
-			if s.DEKVersion != dekVersion {
-				// DEK のローテーション(Phase 3)前は起こらない。起きたなら
-				// データの取り違えなので、黙って別の鍵を試さない。
-				return fmt.Errorf("item %d: dek version %d, want %d", s.ItemID, s.DEKVersion, dekVersion)
-			}
-			aad, err := itemAAD(s.ItemID, s.Version, s.DEKVersion)
+			plaintext, err := decryptSecret(dek, dekVersion, s)
 			if err != nil {
 				return err
-			}
-			plaintext, err := openBytes(dek, s.Nonce, s.ValueEnc, aad)
-			if err != nil {
-				return fmt.Errorf("item %d: %w", s.ItemID, err)
 			}
 			values[s.Key] = string(plaintext)
 			Zero(plaintext)

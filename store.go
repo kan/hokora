@@ -294,6 +294,63 @@ func ResolveEnvironment(ctx context.Context, q querier, projectSlug, envSlug str
 	return &ref, nil
 }
 
+// FindEnvironmentByID は environment を ID から引く。
+//
+// **祖先の deleted_at を検査する**(ルール 58)。プルダウンには生きた
+// environment しか出さないが、POST は細工された ID を運びうるので、ここで
+// 論理削除済みを弾く。
+func FindEnvironmentByID(ctx context.Context, q querier, environmentID int64) (*EnvironmentRef, error) {
+	ref := EnvironmentRef{EnvironmentID: environmentID}
+	err := q.QueryRowContext(ctx, `
+		SELECT p.id, p.slug, e.slug
+		FROM environments e
+		JOIN projects p ON p.id = e.project_id
+		WHERE e.id = ? AND e.deleted_at IS NULL AND p.deleted_at IS NULL`,
+		environmentID).Scan(&ref.ProjectID, &ref.ProjectSlug, &ref.EnvSlug)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find environment: %w", err)
+	}
+	return &ref, nil
+}
+
+// GrantableEnvironment は grant 付与のプルダウンに出す 1 件である。
+type GrantableEnvironment struct {
+	EnvironmentID int64
+	ProjectSlug   string
+	EnvSlug       string
+}
+
+// ListGrantableEnvironments は grant を付与できる environment を全て返す。
+func ListGrantableEnvironments(ctx context.Context, db *sql.DB) (_ []GrantableEnvironment, err error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT e.id, p.slug, e.slug
+		FROM environments e
+		JOIN projects p ON p.id = e.project_id
+		WHERE e.deleted_at IS NULL AND p.deleted_at IS NULL
+		ORDER BY p.slug, e.slug`)
+	if err != nil {
+		return nil, fmt.Errorf("list grantable environments: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("list grantable environments: %w", cerr)
+		}
+	}()
+
+	var out []GrantableEnvironment
+	for rows.Next() {
+		var g GrantableEnvironment
+		if err := rows.Scan(&g.EnvironmentID, &g.ProjectSlug, &g.EnvSlug); err != nil {
+			return nil, fmt.Errorf("scan grantable environment: %w", err)
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
 // HasGrant は machine が environment への grant を持つかを返す。
 //
 // **grant は物理削除される。** 削除された時点で次のリクエストから効く
@@ -380,4 +437,420 @@ func GetEncryptedSecret(ctx context.Context, q querier, environmentID int64, key
 		return nil, fmt.Errorf("get secret: %w", err)
 	}
 	return &s, nil
+}
+
+// ---- Web UI の一覧・CRUD ----
+//
+// **一覧は平文を返さない**(AGENTS.md ルール 41)。マスクは表示上の処理では
+// なく、サーバーが値を返さないことで担保する。ここで返す構造体に平文の
+// フィールドが無いこと自体が、その保証である。
+
+// ProjectRow はダッシュボードの 1 行である。
+type ProjectRow struct {
+	ID    int64
+	Slug  string
+	Name  string
+	Envs  int
+	Items int
+}
+
+// ListProjects は論理削除されていない project を返す。
+func ListProjects(ctx context.Context, db *sql.DB) (_ []ProjectRow, err error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT p.id, p.slug, p.name,
+		       (SELECT COUNT(*) FROM environments e
+		        WHERE e.project_id = p.id AND e.deleted_at IS NULL),
+		       (SELECT COUNT(*) FROM items i
+		        JOIN environments e ON e.id = i.environment_id
+		        WHERE e.project_id = p.id AND e.deleted_at IS NULL AND i.deleted_at IS NULL)
+		FROM projects p
+		WHERE p.deleted_at IS NULL
+		ORDER BY p.slug`)
+	if err != nil {
+		return nil, fmt.Errorf("list projects: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("list projects: %w", cerr)
+		}
+	}()
+
+	var out []ProjectRow
+	for rows.Next() {
+		var p ProjectRow
+		if err := rows.Scan(&p.ID, &p.Slug, &p.Name, &p.Envs, &p.Items); err != nil {
+			return nil, fmt.Errorf("scan project: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// FindProject は slug から project を引く(論理削除済みは見つからない)。
+func FindProject(ctx context.Context, q querier, slug string) (*Project, error) {
+	var p Project
+	err := q.QueryRowContext(ctx,
+		`SELECT id, slug, name FROM projects WHERE slug = ? AND deleted_at IS NULL`, slug).
+		Scan(&p.ID, &p.Slug, &p.Name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find project: %w", err)
+	}
+	return &p, nil
+}
+
+// EnvironmentRow は project 詳細の 1 行である。
+type EnvironmentRow struct {
+	ID    int64
+	Slug  string
+	Name  string
+	Items int
+}
+
+// ListEnvironments は project 配下の environment を返す。
+func ListEnvironments(ctx context.Context, db *sql.DB, projectID int64) (_ []EnvironmentRow, err error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT e.id, e.slug, e.name,
+		       (SELECT COUNT(*) FROM items i
+		        WHERE i.environment_id = e.id AND i.deleted_at IS NULL)
+		FROM environments e
+		WHERE e.project_id = ? AND e.deleted_at IS NULL
+		ORDER BY e.slug`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("list environments: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("list environments: %w", cerr)
+		}
+	}()
+
+	var out []EnvironmentRow
+	for rows.Next() {
+		var e EnvironmentRow
+		if err := rows.Scan(&e.ID, &e.Slug, &e.Name, &e.Items); err != nil {
+			return nil, fmt.Errorf("scan environment: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// ItemRow は item 一覧の 1 行である。**値は含まない。**
+type ItemRow struct {
+	ID        int64
+	Key       string
+	Version   int64
+	UpdatedAt time.Time
+	CreatedBy string
+}
+
+// ListItems は environment 配下の item を返す。**平文も暗号文も返さない。**
+//
+// **祖先の deleted_at もここで検査する**(AGENTS.md ルール 58)。呼び出し側が
+// 先に ResolveEnvironment を通しているかどうかに依存しない ── 依存すると、
+// その手順を踏まない呼び出しが増えた時点で、削除済み project の item が
+// 一覧に出る。
+func ListItems(ctx context.Context, db *sql.DB, environmentID int64) (_ []ItemRow, err error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT i.id, i.key, i.current_version, i.updated_at,
+		       COALESCE((SELECT v.created_by FROM item_versions v
+		                 WHERE v.item_id = i.id AND v.version = i.current_version), '')
+		FROM items i
+		JOIN environments e ON e.id = i.environment_id
+		JOIN projects p ON p.id = e.project_id
+		WHERE i.environment_id = ?
+		  AND i.deleted_at IS NULL AND e.deleted_at IS NULL AND p.deleted_at IS NULL
+		ORDER BY i.key`, environmentID)
+	if err != nil {
+		return nil, fmt.Errorf("list items: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("list items: %w", cerr)
+		}
+	}()
+
+	var out []ItemRow
+	for rows.Next() {
+		var (
+			it        ItemRow
+			updatedAt int64
+		)
+		if err := rows.Scan(&it.ID, &it.Key, &it.Version, &updatedAt, &it.CreatedBy); err != nil {
+			return nil, fmt.Errorf("scan item: %w", err)
+		}
+		it.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// VersionRow は履歴の 1 行である。**値は含まない。**
+type VersionRow struct {
+	Version   int64
+	CreatedAt time.Time
+	CreatedBy string
+	Current   bool
+}
+
+// ListItemVersions は item の履歴を新しい順に返す。
+//
+// **祖先の deleted_at を検査する**(ルール 58)。FindItem / GetItemVersion は
+// 検査しているので、ここだけ抜けていると非対称になり、見落としやすい。
+func ListItemVersions(ctx context.Context, db *sql.DB, itemID int64) (_ []VersionRow, err error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT v.version, v.created_at, v.created_by, (v.version = i.current_version)
+		FROM item_versions v
+		JOIN items i ON i.id = v.item_id
+		JOIN environments e ON e.id = i.environment_id
+		JOIN projects p ON p.id = e.project_id
+		WHERE v.item_id = ?
+		  AND i.deleted_at IS NULL AND e.deleted_at IS NULL AND p.deleted_at IS NULL
+		ORDER BY v.version DESC`, itemID)
+	if err != nil {
+		return nil, fmt.Errorf("list versions: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("list versions: %w", cerr)
+		}
+	}()
+
+	var out []VersionRow
+	for rows.Next() {
+		var (
+			v         VersionRow
+			createdAt int64
+			current   int
+		)
+		if err := rows.Scan(&v.Version, &createdAt, &v.CreatedBy, &current); err != nil {
+			return nil, fmt.Errorf("scan version: %w", err)
+		}
+		v.CreatedAt = time.Unix(createdAt, 0).UTC()
+		v.Current = current != 0
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// FindItem は key から item を引く(祖先の deleted_at も検査する)。
+func FindItem(ctx context.Context, q querier, environmentID int64, key string) (*Item, error) {
+	var it Item
+	err := q.QueryRowContext(ctx, `
+		SELECT i.id, i.key, i.current_version
+		FROM items i
+		JOIN environments e ON e.id = i.environment_id
+		JOIN projects p ON p.id = e.project_id
+		WHERE i.environment_id = ? AND i.key = ?
+		  AND i.deleted_at IS NULL AND e.deleted_at IS NULL AND p.deleted_at IS NULL`,
+		environmentID, key).Scan(&it.ID, &it.Key, &it.CurrentVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find item: %w", err)
+	}
+	it.EnvironmentID = environmentID
+	return &it, nil
+}
+
+// GetItemVersion は特定バージョンの暗号文を返す(履歴の平文表示に使う)。
+func GetItemVersion(ctx context.Context, q querier, itemID, version int64) (*EncryptedSecret, error) {
+	s := EncryptedSecret{ItemID: itemID, Version: version}
+	err := q.QueryRowContext(ctx, `
+		SELECT i.key, v.value_enc, v.nonce, v.dek_version
+		FROM item_versions v
+		JOIN items i ON i.id = v.item_id
+		JOIN environments e ON e.id = i.environment_id
+		JOIN projects p ON p.id = e.project_id
+		WHERE v.item_id = ? AND v.version = ?
+		  AND i.deleted_at IS NULL AND e.deleted_at IS NULL AND p.deleted_at IS NULL`,
+		itemID, version).Scan(&s.Key, &s.ValueEnc, &s.Nonce, &s.DEKVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get item version: %w", err)
+	}
+	return &s, nil
+}
+
+// MachineRow は Machine 一覧の 1 行である。**secret_hash は含まない。**
+type MachineRow struct {
+	ID         int64
+	ClientID   string
+	Name       string
+	Disabled   bool
+	LastAuthAt *time.Time
+	Grants     []GrantRow
+}
+
+// GrantRow は grant 1 件である。
+type GrantRow struct {
+	EnvironmentID int64
+	ProjectSlug   string
+	EnvSlug       string
+}
+
+// ListMachines は machine を grant つきで返す。
+func ListMachines(ctx context.Context, db *sql.DB) (_ []MachineRow, err error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, client_id, name, disabled, last_auth_at FROM machines ORDER BY client_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list machines: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("list machines: %w", cerr)
+		}
+	}()
+
+	var out []MachineRow
+	for rows.Next() {
+		var (
+			m        MachineRow
+			disabled int
+			lastAuth sql.NullInt64
+		)
+		if err := rows.Scan(&m.ID, &m.ClientID, &m.Name, &disabled, &lastAuth); err != nil {
+			return nil, fmt.Errorf("scan machine: %w", err)
+		}
+		m.Disabled = disabled != 0
+		if lastAuth.Valid {
+			at := time.Unix(lastAuth.Int64, 0).UTC()
+			m.LastAuthAt = &at
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list machines: %w", err)
+	}
+
+	// grant は件数が少ないので、machine ごとではなく一括で引いて割り当てる
+	// (N+1 を避ける)。
+	grants, err := listGrants(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Grants = grants[out[i].ID]
+	}
+	return out, nil
+}
+
+func listGrants(ctx context.Context, db *sql.DB) (_ map[int64][]GrantRow, err error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT g.machine_id, g.environment_id, p.slug, e.slug
+		FROM machine_grants g
+		JOIN environments e ON e.id = g.environment_id
+		JOIN projects p ON p.id = e.project_id
+		WHERE e.deleted_at IS NULL AND p.deleted_at IS NULL
+		ORDER BY p.slug, e.slug`)
+	if err != nil {
+		return nil, fmt.Errorf("list grants: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("list grants: %w", cerr)
+		}
+	}()
+
+	out := map[int64][]GrantRow{}
+	for rows.Next() {
+		var (
+			machineID int64
+			g         GrantRow
+		)
+		if err := rows.Scan(&machineID, &g.EnvironmentID, &g.ProjectSlug, &g.EnvSlug); err != nil {
+			return nil, fmt.Errorf("scan grant: %w", err)
+		}
+		out[machineID] = append(out[machineID], g)
+	}
+	return out, rows.Err()
+}
+
+// UserRow はユーザー一覧の 1 行である。**password_hash は含まない。**
+type UserRow struct {
+	ID           int64
+	Username     string
+	MustChangePW bool
+	Disabled     bool
+	CreatedAt    time.Time
+}
+
+// ListUsers はユーザーを返す。
+func ListUsers(ctx context.Context, db *sql.DB) (_ []UserRow, err error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, username, must_change_pw, disabled, created_at FROM users ORDER BY username`)
+	if err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("list users: %w", cerr)
+		}
+	}()
+
+	var out []UserRow
+	for rows.Next() {
+		var (
+			u                    UserRow
+			mustChange, disabled int
+			createdAt            int64
+		)
+		if err := rows.Scan(&u.ID, &u.Username, &mustChange, &disabled, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan user: %w", err)
+		}
+		u.MustChangePW = mustChange != 0
+		u.Disabled = disabled != 0
+		u.CreatedAt = time.Unix(createdAt, 0).UTC()
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// AuditRow は監査ログ画面の 1 行である。
+type AuditRow struct {
+	At         time.Time
+	Actor      string
+	Action     string
+	Target     string
+	Result     string
+	RemoteAddr string
+	Detail     string
+}
+
+// ListAuditLogs は監査ログを新しい順に返す。
+//
+// **削除機能は実装しない**(AGENTS.md ルール 28)。閲覧のみ。
+func ListAuditLogs(ctx context.Context, db *sql.DB, limit int) (_ []AuditRow, err error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT at, actor, action, COALESCE(target, ''), result,
+		       COALESCE(remote_addr, ''), COALESCE(detail, '')
+		FROM audit_logs ORDER BY at DESC, id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list audit logs: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("list audit logs: %w", cerr)
+		}
+	}()
+
+	var out []AuditRow
+	for rows.Next() {
+		var (
+			a  AuditRow
+			at int64
+		)
+		if err := rows.Scan(&at, &a.Actor, &a.Action, &a.Target, &a.Result, &a.RemoteAddr, &a.Detail); err != nil {
+			return nil, fmt.Errorf("scan audit row: %w", err)
+		}
+		a.At = time.Unix(at, 0).UTC()
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }

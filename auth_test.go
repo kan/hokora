@@ -217,3 +217,31 @@ func TestRevokeMachineRequiresAnExistingRow(t *testing.T) {
 		})
 	}
 }
+
+// GenerateClientID は slug として有効な、毎回異なる値を返す。
+//
+// **slug 制約に収まること**が重要である。ここが破れると、生成した client_id が
+// project slug 等と同じ検証を通らず、作成した machine を後段で扱えなくなる。
+func TestGenerateClientID(t *testing.T) {
+	t.Parallel()
+
+	const iterations = 128
+	seen := make(map[string]struct{}, iterations)
+	for i := range iterations {
+		id, err := GenerateClientID()
+		if err != nil {
+			t.Fatalf("GenerateClientID #%d: %v", i, err)
+		}
+		if len(id) != clientIDLen {
+			t.Fatalf("length = %d, want %d", len(id), clientIDLen)
+		}
+		// **slug として通ること。** UI が ValidateSlug を通すのと同じ検証。
+		if err := ValidateSlug(id); err != nil {
+			t.Fatalf("GenerateClientID produced an invalid slug %q: %v", id, err)
+		}
+		if _, dup := seen[id]; dup {
+			t.Fatalf("GenerateClientID repeated %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+}

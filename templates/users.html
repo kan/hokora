@@ -1,0 +1,47 @@
+{{define "content"}}
+<h1>ユーザー</h1>
+
+{{if .InitialPassword}}
+<div class="credential">
+  <h2>ユーザーを作成しました</h2>
+  <p class="notice">初期パスワードはここでしか表示されません。いま控えてください。初回ログイン時に変更が求められます。</p>
+  <dl>
+    <dt>ユーザー名</dt><dd><code>{{.InitialPassword.Username}}</code></dd>
+    <dt>初期パスワード</dt><dd><code class="plaintext">{{.InitialPassword.Password}}</code></dd>
+  </dl>
+  <p><a href="/ui/users">一覧へ戻る</a></p>
+</div>
+{{end}}
+
+<table>
+  <thead><tr><th>ユーザー名</th><th>状態</th><th>作成</th><th></th></tr></thead>
+  <tbody>
+  {{range .Users}}
+    <tr>
+      <td class="key">{{.Username}}</td>
+      <td>
+        {{if .Disabled}}<span class="badge danger">無効</span>{{else}}有効{{end}}
+        {{if .MustChangePW}}<span class="badge">要パスワード変更</span>{{end}}
+      </td>
+      <td>{{formatTime .CreatedAt}}</td>
+      <td>
+        {{if and (not .Disabled) (ne .ID $.User.UserID)}}
+        <form method="post" action="/ui/users/{{.ID}}/disable" class="inline">
+          {{template "csrf" $.CSRFToken}}
+          <button type="submit" class="danger">無効化</button>
+        </form>
+        {{end}}
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+
+<h2>ユーザーを作成</h2>
+<form method="post" action="/ui/users" class="card">
+  {{template "csrf" .CSRFToken}}
+  <label>ユーザー名 <input type="text" name="username" required pattern="[a-z0-9][a-z0-9._-]*"></label>
+  <p class="hint">初期パスワードはサーバーが生成します。</p>
+  <button type="submit">作成</button>
+</form>
+{{end}}

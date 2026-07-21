@@ -1,0 +1,36 @@
+{{define "csrf"}}<input type="hidden" name="csrf_token" value="{{.}}">{{end}}
+{{define "base"}}<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} - hokora</title>
+<link rel="stylesheet" href="/ui/static/style.css">
+<script src="/ui/static/bfcache.js" defer></script>
+</head>
+<body data-bfcache="{{.BFCache}}" data-bfcache-url="{{.BFCacheURL}}">
+<header class="bar">
+  <a class="brand" href="/ui/">hokora</a>
+  {{if .User}}
+  <nav>
+    <a href="/ui/">プロジェクト</a>
+    <a href="/ui/machines">アプリ</a>
+    <a href="/ui/users">ユーザー</a>
+    <a href="/ui/audit">監査ログ</a>
+  </nav>
+  <span class="spacer"></span>
+  {{if .Sealed}}<a class="state sealed" href="/ui/unseal">sealed</a>{{else}}<span class="state">unsealed</span>{{end}}
+  <span class="who">{{.User.Username}}</span>
+  <form method="post" action="/ui/logout" class="inline">
+    {{template "csrf" .CSRFToken}}
+    <button type="submit">ログアウト</button>
+  </form>
+  {{end}}
+</header>
+
+<main>
+{{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+{{block "content" .}}{{end}}
+</main>
+</body>
+</html>{{end}}

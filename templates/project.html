@@ -1,0 +1,33 @@
+{{define "content"}}
+<h1>{{.Project.Slug}}</h1>
+<p class="crumbs"><a href="/ui/">プロジェクト</a> / {{.Project.Slug}}</p>
+
+<table>
+  <thead><tr><th>環境</th><th>名前</th><th>item</th><th></th></tr></thead>
+  <tbody>
+  {{range .Environments}}
+    <tr>
+      <td><a href="/ui/projects/{{$.Project.Slug}}/{{.Slug}}">{{.Slug}}</a></td>
+      <td>{{.Name}}</td>
+      <td class="num">{{.Items}}</td>
+      <td>
+        <form method="post" action="/ui/projects/{{$.Project.Slug}}/{{.Slug}}/delete" class="inline">
+          {{template "csrf" $.CSRFToken}}
+          <button type="submit" class="danger">削除</button>
+        </form>
+      </td>
+    </tr>
+  {{else}}
+    <tr><td colspan="4" class="empty">環境がありません。</td></tr>
+  {{end}}
+  </tbody>
+</table>
+
+<h2>環境を作成</h2>
+<form method="post" action="/ui/projects/{{.Project.Slug}}/environments" class="card">
+  {{template "csrf" .CSRFToken}}
+  <label>slug <input type="text" name="slug" required pattern="[a-z0-9][a-z0-9-]*"></label>
+  <label>名前 <input type="text" name="name"></label>
+  <button type="submit">作成</button>
+</form>
+{{end}}

@@ -1,0 +1,9 @@
+{{define "content"}}
+<h1>{{.Key}}</h1>
+<p class="crumbs"><a href="/ui/projects/{{.Env.ProjectSlug}}/{{.Env.EnvSlug}}">{{.Env.ProjectSlug}} / {{.Env.EnvSlug}}</a> / {{.Key}}</p>
+
+<p class="notice">この表示は監査ログに記録されました。{{if .Version}}（版 {{.Version}}）{{end}}</p>
+<pre class="plaintext">{{.Value}}</pre>
+
+<p><a href="/ui/projects/{{.Env.ProjectSlug}}/{{.Env.EnvSlug}}">一覧へ戻る</a></p>
+{{end}}

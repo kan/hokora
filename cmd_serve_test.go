@@ -425,6 +425,8 @@ func TestRunServerWiresEachMuxToItsOwnListener(t *testing.T) {
 		{"web ui does not serve secrets", addrs.UI, "/v1/secrets", http.StatusNotFound},
 		{"web ui does not serve healthz", addrs.UI, "/healthz", http.StatusNotFound},
 		{"web ui does not serve the admin socket", addrs.UI, "/status", http.StatusNotFound},
+		// Web UI は自分のルートを扱う(セッションが無いのでログインへ送られる)。
+		{"web ui serves the login form", addrs.UI, "/ui/login", http.StatusOK},
 	}
 
 	for _, tt := range tests {
@@ -443,10 +445,89 @@ func TestRunServerWiresEachMuxToItsOwnListener(t *testing.T) {
 			if resp.StatusCode != tt.want {
 				t.Errorf("%s%s = %d, want %d", tt.addr, tt.path, resp.StatusCode, tt.want)
 			}
-			// 全レスポンスに no-store(ミドルウェアが両 listener に付く)。
-			if got := resp.Header.Get("Cache-Control"); got != "no-store" {
-				t.Errorf("%s%s: Cache-Control = %q, want no-store", tt.addr, tt.path, got)
+			// **全レスポンスがキャッシュ不可であること。**
+			// Web UI は DESIGN §8.3 の指定でより長い値を出すので、
+			// 完全一致ではなく no-store を含むことを見る。
+			if got := resp.Header.Get("Cache-Control"); !strings.Contains(got, "no-store") {
+				t.Errorf("%s%s: Cache-Control = %q, want it to contain no-store", tt.addr, tt.path, got)
 			}
 		})
 	}
+}
+
+// init は初期 admin を作り、パスワードを一度だけ表示する(Q3)。
+//
+// **`must_change_pw` を立てる。** 初回ログイン時に変更が求められ、その変更は
+// sealed 状態でも動く(DESIGN §8.3)。
+//
+// **t.Parallel() を呼ばない。** captureOutput は os.Stdout / os.Stderr という
+// パッケージ変数を差し替えるので、同時に走る他のテスト(cmdInit はマスター
+// キーと初期パスワードを実際に印字する)の出力がこのパイプへ流れ込む。
+// 並列化すると「別のテストが出した初期パスワード」を読んでログインを試み、
+// 再現性なく落ちる。captureOutput の注意書きどおり順次実行する。
+func TestEnsureInitialAdmin(t *testing.T) {
+	store := newTestStore(t)
+
+	var setupErr error
+	_, stderr := captureOutput(t, func() {
+		setupErr = ensureInitialAdmin(t.Context(), store, vaultNow)
+	})
+	if setupErr != nil {
+		t.Fatalf("ensureInitialAdmin: %v", setupErr)
+	}
+
+	var (
+		username   string
+		mustChange int
+		hash       string
+	)
+	if err := store.DB().QueryRowContext(t.Context(),
+		`SELECT username, must_change_pw, password_hash FROM users`).
+		Scan(&username, &mustChange, &hash); err != nil {
+		t.Fatalf("select the initial admin: %v", err)
+	}
+	if username != initialAdminUsername {
+		t.Errorf("username = %q, want %q", username, initialAdminUsername)
+	}
+	if mustChange != 1 {
+		t.Error("must_change_pw was not set on the initial admin")
+	}
+
+	// 表示されたパスワードでログインできること(= 表示と保存が一致する)。
+	password := extractInitialPassword(t, stderr)
+	if _, err := Login(t.Context(), store.DB(), initialAdminUsername, password, "10.8.0.9", vaultNow); err != nil {
+		t.Fatalf("login with the printed initial password: %v", err)
+	}
+	// **平文は保存されない。**
+	if strings.Contains(hash, password) {
+		t.Error("the initial password is stored in the database")
+	}
+
+	// 2 回目は何もしない(既存ユーザーを壊さない)。
+	if err := ensureInitialAdmin(t.Context(), store, vaultNow); err != nil {
+		t.Fatalf("second ensureInitialAdmin: %v", err)
+	}
+	var users int
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM users`).Scan(&users); err != nil {
+		t.Fatalf("count users: %v", err)
+	}
+	if users != 1 {
+		t.Errorf("%d users, want 1", users)
+	}
+}
+
+// extractInitialPassword は stderr の出力からパスワードを取り出す。
+func extractInitialPassword(t *testing.T, out string) string {
+	t.Helper()
+
+	const marker = "initial password:"
+	i := strings.Index(out, marker)
+	if i < 0 {
+		t.Fatalf("the initial password was not printed: %q", out)
+	}
+	line := strings.TrimSpace(strings.SplitN(out[i+len(marker):], "\n", 2)[0])
+	if line == "" {
+		t.Fatalf("the initial password line is empty: %q", out)
+	}
+	return line
 }

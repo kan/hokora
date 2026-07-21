@@ -1,0 +1,8 @@
+{{define "content"}}
+<h1>ログイン</h1>
+<form method="post" action="/ui/login" class="card">
+  <label>ユーザー名 <input type="text" name="username" autocomplete="username" required autofocus></label>
+  <label>パスワード <input type="password" name="password" autocomplete="current-password" required></label>
+  <button type="submit">ログイン</button>
+</form>
+{{end}}

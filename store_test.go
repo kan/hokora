@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -693,5 +694,331 @@ func TestMachineIsActive(t *testing.T) {
 	}
 	if active, err := MachineIsActive(t.Context(), store.DB(), id); err != nil || active {
 		t.Errorf("MachineIsActive after disable = (%v, %v), want (false, nil)", active, err)
+	}
+}
+
+// insertItemRow は item を 1 行入れる(暗号処理を通さない)。
+//
+// 一覧クエリの検査に DEK は要らない。**argon2 を払わずに済むよう、
+// Vault を組み立てずに行だけを作る。**
+func insertItemRow(t *testing.T, db *sql.DB, environmentID int64, key string, deleted bool) int64 {
+	t.Helper()
+
+	now := time.Now().Unix()
+	var deletedAt any
+	if deleted {
+		deletedAt = now
+	}
+	res, err := db.ExecContext(t.Context(), `
+		INSERT INTO items (environment_id, key, current_version, deleted_at, created_at, updated_at)
+		VALUES (?, ?, 1, ?, ?, ?)`, environmentID, key, deletedAt, now, now)
+	if err != nil {
+		t.Fatalf("insert item %q: %v", key, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("last insert id: %v", err)
+	}
+	return id
+}
+
+// insertItemVersionRow は item_versions を 1 行入れる(値はダミー)。
+func insertItemVersionRow(t *testing.T, db *sql.DB, itemID, version int64, createdBy string) {
+	t.Helper()
+
+	if _, err := db.ExecContext(t.Context(), `
+		INSERT INTO item_versions (item_id, version, value_enc, nonce, dek_version, created_at, created_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		itemID, version, []byte("ciphertext"), []byte("nonce"), InitialDEKVersion,
+		time.Now().Unix(), createdBy); err != nil {
+		t.Fatalf("insert item version: %v", err)
+	}
+}
+
+// **一覧クエリは論理削除された行と、祖先が削除された行を返さない。**
+//
+// project を論理削除しても配下の environment / item は残る(監査ログの
+// target_*_id を解決可能に保つため)。**祖先の deleted_at を検査していない
+// 一覧が 1 つでもあると、削除したはずの構成が画面に出る**
+// (THREAT_MODEL §11.1)。件数の集計も同じ検査を通っている必要がある。
+func TestListQueriesHideDeletedRows(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	db := store.DB()
+
+	live := insertProject(t, db, "live", false)
+	dead := insertProject(t, db, "dead", true)
+
+	liveEnv := insertEnvironment(t, db, live, "prod", false)
+	deadEnv := insertEnvironment(t, db, live, "stg", true)
+	orphanEnv := insertEnvironment(t, db, dead, "prod", false) // 祖先が削除済み
+
+	insertItemRow(t, db, liveEnv, "DATABASE_URL", false)
+	insertItemRow(t, db, liveEnv, "API_TOKEN", true) // 削除済み item
+	insertItemRow(t, db, deadEnv, "IN_DEAD_ENV", false)
+	insertItemRow(t, db, orphanEnv, "IN_DEAD_PROJECT", false)
+
+	// ---- ListProjects ----
+	projects, err := ListProjects(t.Context(), db)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	if len(projects) != 1 || projects[0].Slug != "live" {
+		t.Fatalf("projects = %+v, want only live", projects)
+	}
+	// 件数も削除済みを数えない。
+	if projects[0].Envs != 1 {
+		t.Errorf("env count = %d, want 1 (the deleted environment must not be counted)", projects[0].Envs)
+	}
+	if projects[0].Items != 1 {
+		t.Errorf("item count = %d, want 1 (deleted items and items in deleted environments must not be counted)",
+			projects[0].Items)
+	}
+
+	// ---- ListEnvironments ----
+	envs, err := ListEnvironments(t.Context(), db, live)
+	if err != nil {
+		t.Fatalf("ListEnvironments: %v", err)
+	}
+	if len(envs) != 1 || envs[0].Slug != "prod" {
+		t.Fatalf("environments = %+v, want only prod", envs)
+	}
+	if envs[0].Items != 1 {
+		t.Errorf("item count = %d, want 1", envs[0].Items)
+	}
+	// 削除済み project の environment は、その project 配下としても出ない。
+	if envs, err := ListEnvironments(t.Context(), db, dead); err != nil {
+		t.Fatalf("ListEnvironments: %v", err)
+	} else if len(envs) != 1 {
+		// **environment 自体は残る**(祖先の検査は解決側の責務。
+		// ここが 0 件になると、監査対象の行が消えたと誤解される)。
+		t.Errorf("environments under a deleted project = %d, want 1 (rows survive)", len(envs))
+	}
+
+	// ---- ListItems ----
+	items, err := ListItems(t.Context(), db, liveEnv)
+	if err != nil {
+		t.Fatalf("ListItems: %v", err)
+	}
+	if len(items) != 1 || items[0].Key != "DATABASE_URL" {
+		t.Fatalf("items = %+v, want only DATABASE_URL", items)
+	}
+	// **一覧の行に値は含まれない**(ルール 41 はサーバーが返さないこと)。
+	// ItemRow に値のフィールドが無いこと自体が保証だが、祖先の解決を
+	// 経ない呼び出しでも平文が出ないことを型で確認しておく。
+	if fields := reflect.TypeOf(items[0]); fields.NumField() != 5 {
+		t.Errorf("ItemRow has %d fields; make sure no value field was added", fields.NumField())
+	}
+
+	// ---- ListItemVersions ----
+	itemID := items[0].ID
+	insertItemVersionRow(t, db, itemID, 1, "user:1")
+	versions, err := ListItemVersions(t.Context(), db, itemID)
+	if err != nil {
+		t.Fatalf("ListItemVersions: %v", err)
+	}
+	if len(versions) != 1 || !versions[0].Current || versions[0].CreatedBy != "user:1" {
+		t.Errorf("versions = %+v, want one current version by user:1", versions)
+	}
+}
+
+// **grant 一覧は、祖先が削除された environment を出さない。**
+//
+// 出してしまうと「削除済みの環境に grant がある」という実体のない表示に
+// なり、剥奪すべき grant の判断を誤らせる。
+func TestListMachinesHidesGrantsWithDeletedAncestors(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	db := store.DB()
+	ac := auditCtx{Actor: ActorAnonymous, Now: vaultNow}
+
+	live := insertProject(t, db, "live", false)
+	dead := insertProject(t, db, "dead", true)
+	liveEnv := insertEnvironment(t, db, live, "prod", false)
+	deletedEnv := insertEnvironment(t, db, live, "stg", true)
+	orphanEnv := insertEnvironment(t, db, dead, "prod", false)
+
+	id, _, err := CreateMachine(t.Context(), db, "app-prod", "app server", ac)
+	if err != nil {
+		t.Fatalf("CreateMachine: %v", err)
+	}
+	for _, envID := range []int64{liveEnv, deletedEnv, orphanEnv} {
+		if _, err := db.ExecContext(t.Context(),
+			`INSERT INTO machine_grants (machine_id, environment_id, created_at) VALUES (?, ?, ?)`,
+			id, envID, vaultNow.Unix()); err != nil {
+			t.Fatalf("insert grant: %v", err)
+		}
+	}
+
+	machines, err := ListMachines(t.Context(), db)
+	if err != nil {
+		t.Fatalf("ListMachines: %v", err)
+	}
+	if len(machines) != 1 {
+		t.Fatalf("%d machines, want 1", len(machines))
+	}
+	if machines[0].LastAuthAt != nil {
+		t.Error("last_auth_at is set for a machine that never authenticated")
+	}
+	if len(machines[0].Grants) != 1 || machines[0].Grants[0].EnvironmentID != liveEnv {
+		t.Errorf("grants = %+v, want only the live environment", machines[0].Grants)
+	}
+
+	// **無効化しても行は残る**(ルール 56。machine は deleted_at を持たない)。
+	if _, err := db.ExecContext(t.Context(),
+		`UPDATE machines SET disabled = 1 WHERE id = ?`, id); err != nil {
+		t.Fatalf("disable machine: %v", err)
+	}
+	machines, err = ListMachines(t.Context(), db)
+	if err != nil {
+		t.Fatalf("ListMachines: %v", err)
+	}
+	if len(machines) != 1 || !machines[0].Disabled {
+		t.Errorf("machines = %+v, want one disabled machine", machines)
+	}
+}
+
+// **ユーザー一覧は無効化済みも含めて返す。**
+//
+// user は deleted_at を持たない(監査ログの actor 参照を保つため)。
+// 無効化したユーザーが一覧から消えると、**「誰が無効化されているか」を
+// 画面から確認できなくなる。**
+func TestListUsersIncludesDisabledUsers(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	admin := newTestUser(t, store)
+	other := newTestUserNamed(t, store, "operator")
+
+	if _, err := store.DB().ExecContext(t.Context(),
+		`UPDATE users SET disabled = 1, must_change_pw = 1 WHERE id = ?`, other); err != nil {
+		t.Fatalf("disable user: %v", err)
+	}
+
+	users, err := ListUsers(t.Context(), store.DB())
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("%d users, want 2", len(users))
+	}
+	byID := map[int64]UserRow{}
+	for _, u := range users {
+		byID[u.ID] = u
+		// **password_hash を持ち出さない。**
+		if reflect.TypeOf(u).NumField() != 5 {
+			t.Errorf("UserRow has %d fields; make sure no password field was added", reflect.TypeOf(u).NumField())
+		}
+	}
+	if byID[admin].Disabled || byID[admin].MustChangePW {
+		t.Errorf("admin = %+v, want an enabled user", byID[admin])
+	}
+	if !byID[other].Disabled || !byID[other].MustChangePW {
+		t.Errorf("operator = %+v, want a disabled user that must change its password", byID[other])
+	}
+}
+
+// **監査ログは新しい順に、上限件数まで返す。**
+//
+// 保持期間は無限(Q4)なので、画面は直近のみを見せる。ここで古い順に
+// 返すと、上限に達した時点で **最新の記録が画面から見えなくなる。**
+func TestListAuditLogsReturnsTheNewestFirst(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	for i := range 5 {
+		entry := auditCtx{Actor: ActorAnonymous, Now: vaultNow.Add(time.Duration(i) * time.Minute)}.
+			entry(ActionSeal, ResultSuccess, nil)
+		if err := RecordAudit(t.Context(), store.DB(), entry); err != nil {
+			t.Fatalf("RecordAudit: %v", err)
+		}
+	}
+
+	rows, err := ListAuditLogs(t.Context(), store.DB(), 3)
+	if err != nil {
+		t.Fatalf("ListAuditLogs: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("%d rows, want 3 (the limit must be applied)", len(rows))
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i].At.After(rows[i-1].At) {
+			t.Fatalf("rows are not ordered newest first: %v", rows)
+		}
+	}
+	if want := vaultNow.Add(4 * time.Minute).UTC(); !rows[0].At.Equal(want) {
+		t.Errorf("newest row at %v, want %v", rows[0].At, want)
+	}
+}
+
+// **一覧クエリ自身が祖先の deleted_at を検査する**(AGENTS.md ルール 58)。
+//
+// 呼び出し側が先に ResolveEnvironment / FindItem を通していることに依存すると、
+// その手順を踏まない呼び出しが増えた時点で、削除済み project 配下の item が
+// 一覧に出る。**クエリ側で閉じる。**
+func TestListQueriesCheckAncestorsThemselves(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	projectID := insertProject(t, store.DB(), "myapp", false)
+	envID := insertEnvironment(t, store.DB(), projectID, "prod", false)
+
+	res, err := store.DB().ExecContext(t.Context(), `
+		INSERT INTO items (environment_id, key, current_version, created_at, updated_at)
+		VALUES (?, 'DATABASE_URL', 1, 0, 0)`, envID)
+	if err != nil {
+		t.Fatalf("insert item: %v", err)
+	}
+	itemID, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("last insert id: %v", err)
+	}
+	if _, err := store.DB().ExecContext(t.Context(), `
+		INSERT INTO item_versions (item_id, version, value_enc, nonce, dek_version, created_at, created_by)
+		VALUES (?, 1, X'00', X'00', 1, 0, 'test')`, itemID); err != nil {
+		t.Fatalf("insert item version: %v", err)
+	}
+
+	// 削除前は見える。
+	items, err := ListItems(t.Context(), store.DB(), envID)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("ListItems = %d rows, %v", len(items), err)
+	}
+	versions, err := ListItemVersions(t.Context(), store.DB(), itemID)
+	if err != nil || len(versions) != 1 {
+		t.Fatalf("ListItemVersions = %d rows, %v", len(versions), err)
+	}
+
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{"project deleted", `UPDATE projects SET deleted_at = 1 WHERE id = ?`},
+		{"environment deleted", `UPDATE environments SET deleted_at = 1 WHERE id = ?`},
+	}
+	ids := map[string]int64{"project deleted": projectID, "environment deleted": envID}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// 同じ DB を使うので並列にしない。各ケースの後に元へ戻す。
+			if _, err := store.DB().ExecContext(t.Context(), tt.sql, ids[tt.name]); err != nil {
+				t.Fatalf("soft delete: %v", err)
+			}
+			defer func() {
+				restore := strings.Replace(tt.sql, "deleted_at = 1", "deleted_at = NULL", 1)
+				if _, err := store.DB().ExecContext(t.Context(), restore, ids[tt.name]); err != nil {
+					t.Fatalf("restore: %v", err)
+				}
+			}()
+
+			if items, err := ListItems(t.Context(), store.DB(), envID); err != nil || len(items) != 0 {
+				t.Errorf("ListItems returned %d rows under a deleted ancestor (%v)", len(items), err)
+			}
+			if versions, err := ListItemVersions(t.Context(), store.DB(), itemID); err != nil || len(versions) != 0 {
+				t.Errorf("ListItemVersions returned %d rows under a deleted ancestor (%v)", len(versions), err)
+			}
+		})
 	}
 }

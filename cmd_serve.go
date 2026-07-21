@@ -179,12 +179,22 @@ func startListeners(ctx context.Context, opts serveOptions, vault *Vault, certs 
 		}
 	}()
 
+	// **unseal のレート制限は socket と Web UI で共有する**(DESIGN §7.4)。
+	unsealLimiter := newRateLimiter(unsealRate, 1)
+
+	ui, err := newUIServer(vault, logger, unsealLimiter)
+	if err != nil {
+		return servers, addrs, serveErr, err
+	}
+
 	// **Machine API と Web UI は、それぞれ独立した mux を持つ。**
 	// ここで同じ mux を 2 つ渡すと、両方のポートで両方のパスが応答する
 	// (AGENTS.md ルール 29 と、その元になった教訓)。
+	//
+	// Web UI にはセキュリティヘッダ / CSP を追加で被せる(DESIGN §8.3)。
 	specs := []listenerSpec{
 		{name: "machine-api", addr: opts.machineAddr, handler: newMachineAPI(vault, logger).machineMux()},
-		{name: "web-ui", addr: opts.uiAddr, handler: uiMuxPlaceholder()},
+		{name: "web-ui", addr: opts.uiAddr, handler: withUIHeaders(ui.uiMux())},
 	}
 	bound := make([]string, len(specs))
 	for i, spec := range specs {
@@ -204,7 +214,7 @@ func startListeners(ctx context.Context, opts serveOptions, vault *Vault, certs 
 	if err != nil {
 		return servers, addrs, serveErr, err
 	}
-	adminSrv := newAdminServer(vault, logger).newAdminHTTPServer()
+	adminSrv := newAdminServer(vault, logger, unsealLimiter).newAdminHTTPServer()
 	servers = append(servers, adminSrv)
 	go serveUntilClosed(adminSrv, adminLn, "admin", serveErr)
 

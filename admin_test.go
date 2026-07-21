@@ -35,7 +35,7 @@ func newTestAdminSealed(t *testing.T) *adminServer {
 func newTestAdminFor(t *testing.T, v *Vault) *adminServer {
 	t.Helper()
 
-	a := newAdminServer(v, discardLogger())
+	a := newAdminServer(v, discardLogger(), newRateLimiter(unsealRate, 1))
 	a.now = func() time.Time { return vaultNow }
 	return a
 }

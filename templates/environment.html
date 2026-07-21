@@ -1,0 +1,42 @@
+{{define "content"}}
+<h1>{{.Env.ProjectSlug}} / {{.Env.EnvSlug}}</h1>
+<p class="crumbs"><a href="/ui/">プロジェクト</a> / <a href="/ui/projects/{{.Env.ProjectSlug}}">{{.Env.ProjectSlug}}</a> / {{.Env.EnvSlug}}</p>
+
+<p class="notice">値は常にマスクされています。表示するには「表示」を押してください（監査ログに記録されます）。</p>
+
+<table>
+  <thead><tr><th>key</th><th>値</th><th>版</th><th>更新</th><th></th></tr></thead>
+  <tbody>
+  {{range .Items}}
+    <tr>
+      <td class="key">{{.Key}}</td>
+      <td class="masked">••••••••</td>
+      <td class="num">{{.Version}}</td>
+      <td>{{formatTime .UpdatedAt}}</td>
+      <td class="actions">
+        <form method="post" action="/ui/projects/{{$.Env.ProjectSlug}}/{{$.Env.EnvSlug}}/items/{{.Key}}/reveal" class="inline">
+          {{template "csrf" $.CSRFToken}}
+          <button type="submit">表示</button>
+        </form>
+        <a href="/ui/projects/{{$.Env.ProjectSlug}}/{{$.Env.EnvSlug}}/items/{{.Key}}/history">履歴</a>
+        <form method="post" action="/ui/projects/{{$.Env.ProjectSlug}}/{{$.Env.EnvSlug}}/items/{{.Key}}/delete" class="inline">
+          {{template "csrf" $.CSRFToken}}
+          <button type="submit" class="danger">削除</button>
+        </form>
+      </td>
+    </tr>
+  {{else}}
+    <tr><td colspan="5" class="empty">item がありません。</td></tr>
+  {{end}}
+  </tbody>
+</table>
+
+<h2>item を作成 / 更新</h2>
+<form method="post" action="/ui/projects/{{.Env.ProjectSlug}}/{{.Env.EnvSlug}}/items" class="card">
+  {{template "csrf" .CSRFToken}}
+  <label>key <input type="text" name="key" required pattern="[A-Z_][A-Z0-9_]*"></label>
+  <label>値 <textarea name="value" rows="3" required></textarea></label>
+  <p class="hint">同じ key を指定すると新しい版として追記されます。</p>
+  <button type="submit">保存</button>
+</form>
+{{end}}
