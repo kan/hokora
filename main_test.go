@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"io"
 	"os"
 	"strings"
@@ -117,15 +116,17 @@ func TestRunWithUnknownCommand(t *testing.T) {
 //
 // M3 で serve / unseal / seal / status / rotate-master / gen-key が実装され、
 // 残るはクライアント側コマンド(M6)だけになった。
-func TestRunUnimplementedCommands(t *testing.T) {
+// get / run は cmdGet / cmdRun へ振り分けられる。引数不足時の usage エラーで
+// ハンドラが応答していること(= 振り分けが届いていること)を確認する。
+func TestRunDispatchesClientCommands(t *testing.T) {
 	for _, cmd := range []string{"get", "run"} {
 		t.Run(cmd, func(t *testing.T) {
 			err := run(t.Context(), []string{cmd})
-			if !errors.Is(err, errNotImplemented) {
-				t.Fatalf("run(%q) = %v, want it to wrap errNotImplemented", cmd, err)
+			if err == nil {
+				t.Fatalf("run(%q) = nil, want a usage error", cmd)
 			}
-			if !strings.Contains(err.Error(), cmd) {
-				t.Errorf("error = %v, want it to name the command %q", err, cmd)
+			if !strings.Contains(err.Error(), "usage") {
+				t.Errorf("error = %v, want a usage error from the %s handler", err, cmd)
 			}
 		})
 	}
@@ -204,9 +205,6 @@ func TestRunDispatchesAdminCommands(t *testing.T) {
 			err := run(t.Context(), args)
 			if err == nil {
 				t.Fatalf("run(%v) = nil, want a connection error", args)
-			}
-			if errors.Is(err, errNotImplemented) {
-				t.Fatalf("run(%v) reported the command as unimplemented", args)
 			}
 			if !strings.Contains(err.Error(), socket) {
 				t.Errorf("error = %v, want it to name the socket path", err)
