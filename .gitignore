@@ -3,6 +3,9 @@
 /hokora-client
 /dist/
 
+# ローカルの作業用ディレクトリ(Pike の TODO 等。公開リポジトリに含めない)
+/.pike/
+
 # ローカルの DB(secret と監査ログが入る。絶対にコミットしない)
 *.db
 *.db-wal

@@ -1,0 +1,27 @@
+hokora
+Copyright 2026 Kan Fushihara
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+---
+
+This software links the following third-party libraries at build time. Their
+licenses apply to those components. The server binary (hokora) links all of
+them; the client binary (hokora-client) and the sdk/ package link only the Go
+standard library.
+
+  modernc.org/sqlite            BSD-3-Clause
+  modernc.org/libc              BSD-3-Clause
+  modernc.org/mathutil          BSD-3-Clause
+  modernc.org/memory            BSD-3-Clause
+  github.com/dustin/go-humanize MIT
+  github.com/google/uuid        BSD-3-Clause
+  github.com/remyoudompheng/bigfft  BSD-3-Clause
+  golang.org/x/crypto           BSD-3-Clause
+  golang.org/x/sys              BSD-3-Clause
+
+The following are development-only tool dependencies (declared with the go.mod
+`tool` directive). They are NOT linked into the released binaries:
+
+  github.com/golangci/golangci-lint  GPL-3.0 (build tool, not distributed)
+  golang.org/x/vuln (govulncheck)    BSD-3-Clause

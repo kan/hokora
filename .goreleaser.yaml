@@ -1,0 +1,75 @@
+# GoReleaser configuration (https://goreleaser.com).
+#
+# hokora targets Linux servers only (mlockall / unix sockets / systemd), so the
+# release builds Linux amd64 / arm64. modernc.org/sqlite is pure Go, so CGO is
+# off and the binaries are static.
+#
+# Two binaries ship in two separate archives:
+#   hokora         — the server (links SQLite + argon2)
+#   hokora-client  — the app-host client (standard library only)
+#
+# Validate locally with: goreleaser check
+version: 2
+
+project_name: hokora
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: hokora
+    main: .
+    binary: hokora
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: [-s -w]
+
+  - id: hokora-client
+    main: ./cmd/hokora-client
+    binary: hokora-client
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: [-s -w]
+
+archives:
+  - id: hokora
+    ids: [hokora]
+    name_template: "hokora_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+      - docs/OPERATIONS.md
+      - docs/THREAT_MODEL.md
+
+  - id: hokora-client
+    ids: [hokora-client]
+    name_template: "hokora-client_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge "
+
+release:
+  github:
+    owner: kan
+    name: hokora
