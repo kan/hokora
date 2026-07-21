@@ -402,6 +402,16 @@ func TestAPIRejectsBadTokens(t *testing.T) {
 	f := newAPIFixture(t)
 	valid := f.token(t)
 
+	// 生バイト列の 1 ビットを反転して、**確実に別の**トークンを作る。
+	// 文字列置換(先頭文字を "A" に)だと、先頭がたまたま "A" のときに
+	// 無置換となり、有効なトークンのままになる(base64url の先頭は毎回
+	// ランダムなので確率的に落ちる)。
+	rawValid, err := DecodeToken(valid)
+	if err != nil {
+		t.Fatalf("DecodeToken: %v", err)
+	}
+	flipped := base64Session(flipByte(rawValid, 0))
+
 	tests := []struct {
 		name   string
 		header string
@@ -411,7 +421,7 @@ func TestAPIRejectsBadTokens(t *testing.T) {
 		{"empty bearer", "Bearer "},
 		{"garbage", "Bearer not-a-token"},
 		{"truncated", "Bearer " + valid[:len(valid)-1]},
-		{"flipped", "Bearer " + strings.Replace(valid, valid[:1], "A", 1)},
+		{"flipped", "Bearer " + flipped},
 	}
 
 	for _, tt := range tests {
