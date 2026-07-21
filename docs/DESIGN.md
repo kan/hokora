@@ -592,7 +592,7 @@ slug / key は再利用可能(THREAT_MODEL §11.2)なので、`target` 文字列
 |----|-----|
 | DB | `BLOB` |
 | JSON API | `string` |
-| `hokora run` | 環境変数 |
+| `hokora-client run` | 環境変数 |
 | SDK | `[]byte` |
 
 **制約:**
@@ -1378,20 +1378,24 @@ hokora seal
 hokora status
 hokora rotate-master             # §6.7
 
-# クライアント側
-hokora get KEY                   # 単一 secret を stdout へ(端末確認用)
-hokora run -- ./myapp            # 環境変数に展開(移行用)
+# クライアント側(アプリホストに置く別バイナリ hokora-client)
+hokora-client get KEY            # 単一 secret を stdout へ(端末確認用)
+hokora-client run -- ./myapp     # 環境変数に展開(移行用)
 ```
+
+**`hokora-client` は別バイナリ**(`cmd/hokora-client`)である。アプリ群へ
+サーバー本体の依存(SQLite / argon2 等)をリンクさせないため、サーバー
+バイナリ `hokora` から分離し、標準ライブラリ + sdk のみに依存させる(§12)。
 
 **`hokora export` は実装しない**(P2)。
 
-**`hokora get` の位置づけ:** 端末での確認用である。
-**`hokora get KEY > file` のようにファイル生成に使ってはならない**
+**`hokora-client get` の位置づけ:** 端末での確認用である。
+**`hokora-client get KEY > file` のようにファイル生成に使ってはならない**
 (`export` を実装しない理由と同じ)。OPERATIONS.md に明記する。
 
-**`hokora get` の credential 経路:** `/etc/hokora/credentials` は root:0600 なので、
-人間が対話的に使う場合は `sudo hokora get` になる。日常的な確認は Web UI を
-使うことを推奨する(OPERATIONS.md)。
+**`hokora-client get` の credential 経路:** `/etc/hokora/credentials` は
+root:0600 なので、人間が対話的に使う場合は `sudo hokora-client get` になる。
+日常的な確認は Web UI を使うことを推奨する(OPERATIONS.md)。
 
 ### 10.1 unseal の実行例
 
@@ -1442,12 +1446,12 @@ LimitCORE=0                 # 推奨(THREAT_MODEL §5.4)
 **注:** `$CREDENTIALS_DIRECTORY` はサービス実行 UID から読める。
 T1-a の攻撃者もここから credential を取得できる(N2 として受容)。
 
-### 10.3 `hokora run` の限界
+### 10.3 `hokora-client run` の限界
 
-**`hokora run` は環境変数に secret を展開するため、`/proc/<pid>/environ` から
-T1-a の攻撃者が secret 値そのものを読める**(THREAT_MODEL R5)。
+**`hokora-client run` は環境変数に secret を展開するため、`/proc/<pid>/environ`
+から T1-a の攻撃者が secret 値そのものを読める**(THREAT_MODEL R5)。
 
-**これは V1 を無効化する。** `hokora run` は既存アプリケーションの移行用と
+**これは V1 を無効化する。** `hokora-client run` は既存アプリケーションの移行用と
 位置づけ、**Go アプリケーションでは SDK 方式を使うこと。**
 
 ---
@@ -1555,7 +1559,6 @@ hokora/
 ├── cmd_serve.go
 ├── cmd_unseal.go            # unseal / seal / status
 ├── cmd_rotate.go            # rotate-master
-├── cmd_client.go            # get / run
 │
 ├── crypto.go                # KDF、AEAD、itemAAD、ゼロクリア
 ├── crypto_test.go
@@ -1593,10 +1596,16 @@ hokora/
 │   ├── style.css
 │   └── bfcache.js           # §9.3
 │
+├── cmd/
+│   └── hokora-client/       # get / run(別バイナリ。標準ライブラリ + sdk のみ)
+│       ├── main.go
+│       ├── client.go
+│       └── client_test.go
+│
 ├── sdk/
-│   ├── client.go
+│   ├── hokora.go
 │   ├── secrets.go
-│   └── client_test.go
+│   └── hokora_test.go
 │
 └── docs/
     ├── THREAT_MODEL.md / DESIGN.md / ROADMAP.md / OPERATIONS.md

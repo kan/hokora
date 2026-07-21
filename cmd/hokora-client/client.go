@@ -80,7 +80,7 @@ func loadCAPool(path string) (*x509.CertPool, error) {
 
 // cmdGet は単一の secret を stdout に出力する。
 //
-// **端末での確認用である**(DESIGN §10。`hokora get KEY > file` のような
+// **端末での確認用である**(DESIGN §10。`hokora-client get KEY > file` のような
 // ファイル生成に使ってはならない。`export` を実装しない理由と同じ)。
 func cmdGet(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("get", flag.ContinueOnError)
@@ -95,7 +95,7 @@ func cmdGet(ctx context.Context, args []string) error {
 		return fmt.Errorf("get: %w", err)
 	}
 	if flags.NArg() != 1 {
-		return errors.New("usage: hokora get [flags] KEY")
+		return errors.New("usage: hokora-client get [flags] KEY")
 	}
 	key := flags.Arg(0)
 
@@ -131,7 +131,7 @@ func cmdGet(ctx context.Context, args []string) error {
 //
 // **T1-a の攻撃者が /proc/<pid>/environ から secret 値そのものを読める**
 // (THREAT_MODEL R5)。これは V1 を無効化する。**Go アプリケーションでは
-// SDK 方式を使うこと。** hokora run は既存アプリの移行用と位置づける。
+// SDK 方式を使うこと。** hokora-client run は既存アプリの移行用と位置づける。
 func cmdRun(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -145,10 +145,10 @@ func cmdRun(ctx context.Context, args []string) error {
 		return fmt.Errorf("run: %w", err)
 	}
 
-	// `hokora run [flags] -- cmd args...` の形。-- 以降が起動するコマンド。
+	// `hokora-client run [flags] -- cmd args...` の形。-- 以降が起動するコマンド。
 	command := flags.Args()
 	if len(command) == 0 {
-		return errors.New("usage: hokora run [flags] -- COMMAND [args...]")
+		return errors.New("usage: hokora-client run [flags] -- COMMAND [args...]")
 	}
 
 	opts, err := buildOpts()

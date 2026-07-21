@@ -109,24 +109,20 @@ func TestRunWithUnknownCommand(t *testing.T) {
 	}
 }
 
-// まだ実装されていないサブコマンドは、"not implemented" であって
-// "unknown command" ではないことを区別できなければならない。前者は
-// hokora 側の既知の未実装、後者は利用者の打ち間違いであり、運用者への
-// メッセージが変わる。
-//
-// M3 で serve / unseal / seal / status / rotate-master / gen-key が実装され、
-// 残るはクライアント側コマンド(M6)だけになった。
-// get / run は cmdGet / cmdRun へ振り分けられる。引数不足時の usage エラーで
-// ハンドラが応答していること(= 振り分けが届いていること)を確認する。
-func TestRunDispatchesClientCommands(t *testing.T) {
+// get / run は **サーバーバイナリの責務ではない**。クライアント専用の
+// hokora-client バイナリ(cmd/hokora-client)へ分離したので、root の hokora
+// では未知コマンドとして扱われること(= 誤って再統合していないこと)を
+// 固定する。サーバー本体に sqlite / argon2 を積んだままアプリホストへ
+// 配る事態を防ぐための境界である。
+func TestServerBinaryDoesNotHandleClientCommands(t *testing.T) {
 	for _, cmd := range []string{"get", "run"} {
 		t.Run(cmd, func(t *testing.T) {
 			err := run(t.Context(), []string{cmd})
 			if err == nil {
-				t.Fatalf("run(%q) = nil, want a usage error", cmd)
+				t.Fatalf("run(%q) = nil, want an unknown-command error", cmd)
 			}
-			if !strings.Contains(err.Error(), "usage") {
-				t.Errorf("error = %v, want a usage error from the %s handler", err, cmd)
+			if !strings.Contains(err.Error(), "unknown command") {
+				t.Errorf("error = %v, want an unknown-command error", err)
 			}
 		})
 	}

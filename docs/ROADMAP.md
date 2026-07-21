@@ -391,7 +391,8 @@ M4 は「Machine API・認証・ネットワーク境界」に集中する。
   - **`Zero()` が best effort であることを godoc に明記**
   - **swap / core dump についても godoc に明記**(P7)
   - **`InsecureSkipVerify` 相当を提供しない**
-- `cmd_client.go` — `hokora get` / `hokora run`
+- `cmd/hokora-client/` — クライアント専用バイナリ `hokora-client`(`get` / `run`)。
+  **標準ライブラリ + sdk のみに依存**(`sdk_deps_test.go` で検査)
 - `docs/OPERATIONS.md` — Runbook
 
 **Runbook に含める内容(必須):**
@@ -418,8 +419,8 @@ M4 は「Machine API・認証・ネットワーク境界」に集中する。
 | **侵害検知時の対応(R13)** | **revoke は「今後の取得」しか止めない。当該 grant 範囲の secret を個別にローテーションする** |
 | **監査ログの見方** | V4 は運用によってのみ実現される。**`success` は「送信を開始した」の意味**(§10.5) |
 | **grant の最小化** | V2 は運用によってのみ実現される |
-| **`hokora get` の位置づけ** | **端末確認用。`> file` でファイル生成に使わない** |
-| **`hokora run` の限界** | **T1-a で `/proc/<pid>/environ` から secret が読める。Go アプリでは SDK を使う**(R5) |
+| **`hokora-client get` の位置づけ** | **端末確認用。`> file` でファイル生成に使わない** |
+| **`hokora-client run` の限界** | **T1-a で `/proc/<pid>/environ` から secret が読める。Go アプリでは SDK を使う**(R5) |
 | **Web UI は JavaScript 有効を前提とする** | bfcache 対策のため(DESIGN §9.3) |
 | トラブルシューティング | |
 
@@ -427,8 +428,9 @@ M4 は「Machine API・認証・ネットワーク境界」に集中する。
 
 - **SDK が `$CREDENTIALS_DIRECTORY/hokora` から credential を読める**
 - SDK からメモリ上に secret を取得できる
-- `hokora run -- ./app` で環境変数に展開して子プロセスが起動する
-- `hokora get KEY` が stdout に値を出力する
+- `hokora-client run -- ./app` で環境変数に展開して子プロセスが起動する
+- `hokora-client get KEY` が stdout に値を出力する
+- **`hokora-client` が標準ライブラリ + sdk のみに依存する**(サーバー依存を積まない)
 - **Runbook に従って、初見の人間が unseal できる**
 - **Runbook に従ってバックアップを取得し、そこから復元できることを実際に確認する**
 - **systemd unit の例に `LimitCORE=0` と `LimitMEMLOCK=infinity` が含まれる**
@@ -447,7 +449,7 @@ M4 は「Machine API・認証・ネットワーク境界」に集中する。
   - **hokora が何をしないか**(THREAT_MODEL へのリンク)
   - **secret zero problem を解かないことの明示**
   - **T1 に対する防御が部分的であることの明示**
-  - **`hokora run` では V1 が成立しないことの明示**
+  - **`hokora-client run` では V1 が成立しないことの明示**
   - **revoke は今後の取得しか止めないことの明示**
   - **swap(mlockall)/ core dump / kdump / firewalld の運用要件が
     必須であることの明示**

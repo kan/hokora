@@ -1,5 +1,6 @@
 # ビルド成果物
 /hokora
+/hokora-client
 /dist/
 
 # ローカルの DB(secret と監査ログが入る。絶対にコミットしない)

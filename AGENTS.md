@@ -356,11 +356,22 @@ hokora/
 ├── api.go / admin.go / auth.go / session.go / ratelimit.go / ui.go
 ├── templates/           # embed
 ├── static/              # style.css, bfcache.js
+├── cmd/hokora-client/   # クライアント専用バイナリ(get / run)。標準ライブラリ + sdk のみ
 ├── sdk/                 # 外部から import される Go SDK
 └── docs/
 ```
 
-**パッケージは `main` と `sdk` の 2 つのみ。** `internal/` を作らない。
+**サーバー本体は root の `main` パッケージに集約する。** `internal/` を作らず、
+サーバーロジックを複数パッケージに分割しない。
+
+**例外: `cmd/<name>/` の追加バイナリは許可する。** これはサーバーロジックの
+分割ではなく、**別バイナリの切り出し**である。現状は `cmd/hokora-client`
+(アプリホストに置く get / run 専用バイナリ)のみ。目的は、アプリ群に配る
+バイナリへ **サーバー本体の依存(`modernc.org/sqlite` / argon2 等)を
+リンクさせない**ことであり、依存・脆弱性・攻撃面を減らす
+(T1-a に対する新しい防御ではない。`sdk_deps_test.go` が「標準ライブラリ +
+sdk のみ」を不変条件として検査する)。**`cmd/<name>/` を増やすときも
+`package main` に限り、サーバーロジックはあくまで root に置く。**
 
 ---
 

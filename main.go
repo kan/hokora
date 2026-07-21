@@ -25,10 +25,8 @@ Server commands:
   rotate-master --stdin
                   rotate the master key (current and new key are read from stdin)
 
-Client commands:
-  get <KEY>       print a single secret value to stdout (terminal use only)
-  run -- <cmd>    run a command with secrets in its environment (migration aid;
-                  secrets are readable via /proc/<pid>/environ, use the SDK in Go apps)
+To fetch secrets from an application host, use the separate hokora-client
+binary (or import github.com/kan/hokora/sdk in Go apps).
 `
 
 func main() {
@@ -60,10 +58,6 @@ func run(ctx context.Context, args []string) error {
 		return cmdStatus(ctx, rest)
 	case "rotate-master":
 		return cmdRotateMaster(ctx, rest)
-	case "get":
-		return cmdGet(ctx, rest)
-	case "run":
-		return cmdRun(ctx, rest)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
