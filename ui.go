@@ -195,6 +195,13 @@ func (u *uiServer) authed(mode sealedMode, next uiHandler) http.HandlerFunc {
 				return
 			}
 			if err := verifyCSRF(raw, r.PostFormValue("csrf_token")); err != nil {
+				// **認証済みの主体が拒否された事実を記録する**(ルール 22/26)。
+				// actor はセッションの user。fail open(拒否はどのみち確定して
+				// いるので、記録できなくても 403 のまま)。
+				reason := ReasonInvalidCSRF
+				ac := auditCtx{Actor: actorUser(su.UserID), ActorUserID: &su.UserID, Via: ViaWeb, Now: now}
+				RecordAuditBestEffort(r.Context(), u.vault.db, u.logger,
+					ac.entry(ActionCSRFReject, ResultFailure, &AuditDetail{Reason: &reason}))
 				u.renderError(w, r, http.StatusForbidden, "セッションが切り替わりました。操作をやり直してください")
 				return
 			}
@@ -283,6 +290,14 @@ func (u *uiServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// 第二段: username。攻撃者制御の値なので、これ *だけ* には頼らない。
 	if !u.usernameLimiter.Allow(username, now) {
+		// **第二段の拒否は記録する**(Machine API の client_id 段と対称)。
+		// 第一段(IP)は記録しない ── 未認証トラフィックで監査を膨らませない
+		// ため。生の username は subject_digest に潰す(ルール 25)。fail open。
+		digest := subjectDigest(username)
+		reason := ReasonRateLimited
+		ac := anonymousAudit(remote, now)
+		RecordAuditBestEffort(r.Context(), u.vault.db, u.logger,
+			ac.entry(ActionAuthUser, ResultFailure, &AuditDetail{Reason: &reason, SubjectDigest: &digest}))
 		u.renderError(w, r, http.StatusTooManyRequests, "試行が多すぎます。しばらく待ってください")
 		return
 	}
@@ -821,7 +836,9 @@ func (u *uiServer) handleDisableUser(w http.ResponseWriter, r *http.Request, req
 //
 // crypto/rand 由来の 24 バイトを base64url にする(32 文字)。
 func generateInitialPassword() (string, error) {
-	_, encoded, err := generateRandomToken(24)
+	raw, encoded, err := generateRandomToken(24)
+	// 生バイト列は secret 相当。エンコード後は best effort で消す(ルール 15)。
+	Zero(raw)
 	return encoded, err
 }
 

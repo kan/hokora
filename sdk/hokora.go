@@ -171,6 +171,13 @@ func New(opts ...Option) (*Client, error) {
 		return nil, err
 	}
 
+	// **アドレスは https:// のみ許す。** http:// を受け入れると、設定ミスや
+	// タイプミスで client_secret / トークン / secret 値が平文で流れる。TLS を
+	// 無効化する手段は提供しない(AGENTS.md ルール 31、THREAT_MODEL §5.2)。
+	if !strings.HasPrefix(cfg.addr, "https://") {
+		return nil, fmt.Errorf("%w: server address must use https://", ErrMissingConfig)
+	}
+
 	httpClient := cfg.httpClient
 	if httpClient == nil {
 		httpClient = &http.Client{
@@ -312,6 +319,42 @@ func (c *Client) Fetch(ctx context.Context) (*Secrets, error) {
 	return newSecrets(payload.Secrets), nil
 }
 
+// FetchKey retrieves a single secret by key for the configured project and
+// environment. It hits the server's single-key endpoint, so only that one key
+// is read and audited — unlike Fetch, which reads (and audits) every granted
+// key. Prefer FetchKey when you need one value.
+//
+// The returned Secrets holds just that key. As with Fetch, nothing is cached;
+// the caller owns the result and should call Zero when finished. A key that
+// does not exist is reported as ErrForbidden, indistinguishable from a missing
+// grant (the server does not reveal which keys exist).
+func (c *Client) FetchKey(ctx context.Context, key string) (*Secrets, error) {
+	token, err := c.authenticate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer zero(token)
+
+	req, err := c.newRequest(ctx, http.MethodGet,
+		fmt.Sprintf("/v1/secrets/%s?project=%s&env=%s",
+			url.PathEscape(key),
+			url.QueryEscape(c.cfg.project), url.QueryEscape(c.cfg.env)), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+string(token))
+
+	var payload struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	if err := c.do(req, &payload); err != nil {
+		return nil, err
+	}
+
+	return newSecrets(map[string]string{payload.Key: payload.Value}), nil
+}
+
 // authenticate exchanges the credential for a bearer token.
 func (c *Client) authenticate(ctx context.Context) ([]byte, error) {
 	body, err := json.Marshal(map[string]string{
@@ -321,6 +364,9 @@ func (c *Client) authenticate(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("hokora: encode auth request: %w", err)
 	}
+	// client_secret を含むボディは best effort で消す(cfg.clientSecret 自体は
+	// string で残るが、消せるバッファはトークン処理と揃えて消す)。
+	defer zero(body)
 
 	req, err := c.newRequest(ctx, http.MethodPost, "/v1/auth/token", bytes.NewReader(body))
 	if err != nil {

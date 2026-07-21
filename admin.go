@@ -177,6 +177,13 @@ func parseRotateBody(body []byte) (oldMK, newMK []byte, err error) {
 	if len(lines) != 2 {
 		return nil, nil, fmt.Errorf("expected 2 lines (current and new master key), got %d", len(lines))
 	}
+	// **各行に §6.1 の正規化を適用する**(DESIGN §6.7)。行区切りが CRLF の
+	// 場合、"\n" split 後に前の行へ "\r" が残る。DecodeMasterKey は行中の
+	// CR/LF を(折り返し MK 対策で)一切許さないため、行末の CR をここで
+	// 落としておく(Windows 由来の貼り付けで誤解を招くエラーにしない)。
+	for i := range lines {
+		lines[i] = bytes.TrimSuffix(lines[i], []byte("\r"))
+	}
 
 	oldMK, err = DecodeMasterKey(lines[0])
 	if err != nil {

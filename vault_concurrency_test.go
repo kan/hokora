@@ -817,3 +817,186 @@ func TestPasswordChangeDoesNotRaceUserDisable(t *testing.T) {
 		}
 	}
 }
+
+// E: PutSecret のロック獲得順序(rule 68)。
+//
+// 修正前の PutSecret は「DB tx を開く(新規 key なら nextItemVersion が
+// INSERT で SQLite の書き込みロックを取る) → Vault の read lock(WithDEK)を
+// 取る」の順だった。DisableMachine / RotateMachineSecret(revokeMachine)は
+// 逆順(Vault の write lock → DB 書き込み)であり、両者が同時に走ると
+// 次の AB-BA が成立しうる:
+//
+//	PutSecret: SQLite ロックを保持 → Vault の read lock 待ち
+//	revoke:    Vault の write lock を保持 → SQLite ロック待ち
+//
+// SQLite 側には busy_timeout(5s)があるので永久デッドロックにはならないが、
+// その間 revoke(緊急遮断)側が SQLITE_BUSY で失敗しうる。**新規 key への
+// PutSecret と revoke 系が同時に走っても、どちらも一度もエラーにならず
+// 速やかに完了すること**を、多数回・タイムアウト付きで確認する
+// (race detector はこの種の意味上の競合を検出しない。AGENTS.md ルール 68)。
+//
+// **writer は 1 つに絞る。** 修正版は PutSecret が Vault.mu の read lock を
+// DB tx より先に取るため、複数の PutSecret を本当に並行させると、それぞれが
+// read lock(RWMutex は複数リーダーを許す)を握ったまま独立した SQLite 書き込み
+// tx を同時に開くことになる。これは本テストが検出したい「PutSecret と
+// revoke の順序」の問題ではなく、WAL の書き込みスナップショット競合という
+// 別の(修正の有無に関わらず起きる)事象であり、busy_timeout でも救えない
+// ことを手元で確認した。writer を 1 に絞ることで、修正版では Vault.mu が
+// PutSecret と revoke の DB 書き込みを完全に直列化し(RWMutex は排他的な
+// writer と read lock を同時に許さない)、この別種の競合を構造的に避けられる。
+func TestPutSecretDoesNotDeadlockWithEmergencyRevocation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		revoke func(t *testing.T, f *apiFixture, ac auditCtx) error
+	}{
+		{"rotate_secret", func(t *testing.T, f *apiFixture, ac auditCtx) error {
+			_, err := RotateMachineSecret(t.Context(), f.vault, f.machineID, ac)
+			return err
+		}},
+		{"disable", func(t *testing.T, f *apiFixture, ac auditCtx) error {
+			// UPDATE ... WHERE id = ? は既に disabled でも 1 行更新するので、
+			// 複数ラウンドにわたって繰り返し呼んでよい(冪等)。
+			return DisableMachine(t.Context(), f.vault, f.machineID, ac)
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newAPIFixture(t)
+			env := &EnvironmentRef{
+				ProjectSlug: testProjectSlug, EnvSlug: testEnvSlug,
+				ProjectID: f.projectID, EnvironmentID: f.environmentID,
+			}
+			ac := auditCtx{Actor: ActorAnonymous, Now: vaultNow}
+
+			const rounds = 40
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+
+				for round := range rounds {
+					var (
+						wg    sync.WaitGroup
+						start = make(chan struct{})
+					)
+
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						<-start
+						// **NEW key であること**が肝要: 既存 key への更新は
+						// items への INSERT を経ないため、この競合を再現しない。
+						key := fmt.Sprintf("NEW_KEY_%d", round)
+						if err := PutSecret(t.Context(), f.vault, env, key, []byte("v"), ac); err != nil {
+							t.Errorf("round %d: PutSecret(%s): %v", round, key, err)
+						}
+					}()
+
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						<-start
+						if err := tt.revoke(t, f, ac); err != nil {
+							t.Errorf("round %d: revoke: %v", round, err)
+						}
+					}()
+
+					close(start)
+					wg.Wait()
+				}
+			}()
+
+			select {
+			case <-done:
+			case <-time.After(45 * time.Second):
+				t.Fatal("PutSecret and emergency revocation did not complete in time (lock order regression?)")
+			}
+		})
+	}
+}
+
+// F: Unseal の TOCTOU 対策(keyring 再読)を、実配線(v.Unseal と
+// v.RotateMaster の実際の並行実行)で検証する。
+//
+// keyringWrappingEqual 自体の直接テストは keyring_test.go の
+// TestKeyringWrappingEqual にある。こちらは、再読ゲートが無い(=修正前の)
+// 実装だと何が起きるかを狙って再現する:
+//
+//	unseal: LoadKeyring(旧 keyring を読む) → argon2 で復号に成功
+//	rotate:                                  write lock 不要 → commit(新 keyring)
+//	unseal:                                                     公開(旧 keyring 由来の
+//	                                                             dek で unsealed にする)← バグ
+//
+// 修正版は公開直前に keyring を再読し、rotate が割り込んでいれば ErrDecrypt
+// で拒否する。**DEK の中身自体は rotate で変わらない**(ラップし直すだけ)
+// ため、最終状態(dek の値)だけを見ても両者は区別できない。区別できるのは
+// 「rotate が commit を終えた後に、旧 MK を検証窓として使った Unseal が
+// success で返るかどうか」という時間的な事実だけである。
+//
+// そのため、RotateMaster が返った直後(= DB への commit が確実に完了した
+// 後。RotateMaster は手順 10 で commit 後の再検証までしてから返る)に立てる
+// フラグと、各 Unseal(oldMK) 呼び出しが返った直後の判定を組み合わせる。
+// フラグの Store と Load は、それぞれ自分の goroutine 内で該当する呼び出しの
+// 「直後」に置くため、両者が偶然その一瞬(ナノ秒オーダー)ですれ違う確率は、
+// argon2 1 回分(数十〜数百 ms)の競合窓に対して無視できる
+// (vault_concurrency_test.go の他のテスト、たとえば C2 の 50ms
+// time.After と同種の、時間に基づく現実的な許容である)。
+func TestVaultUnsealRejectsStaleKeyringDuringRotateRace(t *testing.T) {
+	t.Parallel()
+
+	v, _, currentMK := newTestVault(t)
+
+	const rounds = 5
+	const attempts = 12
+
+	for round := range rounds {
+		nextMK, err := GenerateKey()
+		if err != nil {
+			t.Fatalf("GenerateKey: %v", err)
+		}
+
+		var (
+			rotateCommitted atomic.Bool
+			staleSuccess    atomic.Bool
+			wg              sync.WaitGroup
+			start           = make(chan struct{})
+		)
+
+		for range attempts {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				err := v.Unseal(t.Context(), currentMK, socketAudit(vaultNow))
+				if err == nil && rotateCommitted.Load() {
+					staleSuccess.Store(true)
+				}
+			}()
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := v.RotateMaster(t.Context(), currentMK, nextMK, socketAudit(vaultNow)); err != nil {
+				t.Errorf("round %d: RotateMaster: %v", round, err)
+			}
+			rotateCommitted.Store(true)
+		}()
+
+		close(start)
+		wg.Wait()
+
+		if staleSuccess.Load() {
+			t.Fatalf("round %d: Unseal(old master key) succeeded after RotateMaster had already committed the new keyring", round)
+		}
+
+		v.Seal(t.Context(), socketAudit(vaultNow))
+		currentMK = nextMK
+	}
+}

@@ -29,6 +29,10 @@ const (
 	ActionAuthMachine Action = "auth.machine"
 	ActionAuthUser    Action = "auth.user"
 	ActionLogout      Action = "logout"
+	// ActionCSRFReject は、認証済みセッションの POST が CSRF 検証で拒否された
+	// ことを記録する(ルール 22/26)。actor はセッションの user、対象は記録
+	// しない(どの操作かは確定していないため)。
+	ActionCSRFReject Action = "session.csrf_reject"
 
 	ActionUserCreate         Action = "user.create"
 	ActionUserDisable        Action = "user.disable"
@@ -52,7 +56,7 @@ const (
 var auditActions = map[Action]struct{}{
 	ActionSecretRead: {}, ActionSecretWrite: {}, ActionSecretDelete: {}, ActionSecretReveal: {},
 	ActionUnsealAttempt: {}, ActionSeal: {}, ActionMasterRotate: {},
-	ActionAuthMachine: {}, ActionAuthUser: {}, ActionLogout: {},
+	ActionAuthMachine: {}, ActionAuthUser: {}, ActionLogout: {}, ActionCSRFReject: {},
 	ActionUserCreate: {}, ActionUserDisable: {}, ActionUserPasswordChange: {},
 	ActionMachineCreate: {}, ActionMachineDisable: {}, ActionMachineRotateSecret: {},
 	ActionGrantCreate: {}, ActionGrantDelete: {},
@@ -74,22 +78,26 @@ const (
 // Reason は detail.reason に入れてよい値である(DESIGN §5.4)。
 // 自由記述にすると、失敗理由の説明という体裁で攻撃者制御の文字列が入る。
 //
+// **sealed 状態の認証(503)とトークン/セッションの期限切れ(401)は、意図的に
+// 監査しない。** どちらも未認証で高頻度に到達しうる経路で、記録すると削除でき
+// ない監査テーブルを未認証トラフィックだけで膨らませられる(api.go の
+// authorize / handleAuthToken のコメント参照)。そのため対応する reason 定数
+// (かつて存在した "sealed" / "expired")は持たない。**定義したのに使わない
+// 定数を残さない**(AGENTS.md の教訓)。
+//
 //nolint:gosec // G101: 認証情報ではなく、監査ログに記録する理由コードである
 const (
 	ReasonInvalidCredentials = "invalid_credentials"
 	ReasonRateLimited        = "rate_limited"
 	ReasonForbidden          = "forbidden"
-	ReasonSealed             = "sealed"
 	ReasonDisabled           = "disabled"
-	ReasonExpired            = "expired"
 	ReasonInvalidCSRF        = "invalid_csrf"
 	ReasonInvalidMasterKey   = "invalid_master_key"
 )
 
 var auditReasons = map[string]struct{}{
 	ReasonInvalidCredentials: {}, ReasonRateLimited: {}, ReasonForbidden: {},
-	ReasonSealed: {}, ReasonDisabled: {}, ReasonExpired: {},
-	ReasonInvalidCSRF: {}, ReasonInvalidMasterKey: {},
+	ReasonDisabled: {}, ReasonInvalidCSRF: {}, ReasonInvalidMasterKey: {},
 }
 
 // Via は操作がどの経路から来たかを表す。

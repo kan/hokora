@@ -195,7 +195,17 @@ var dummyPasswordHash = sync.OnceValues(func() (string, error) {
 	}
 	defer Zero(secret)
 
-	hash := argon2.IDKey(secret, salt, argon2Time, argon2Memory, argon2Threads, passwordHashBytes)
+	// **argon2 は必ず semaphore を通す**(ルール 39)。一度きり(OnceValues)
+	// だが、ここだけ素通しにすると「全 argon2 は semaphore 経由」の不変条件が
+	// 崩れ、瞬間的に同時実行数が上限を超えうる。生成は起動後の初回ログインで
+	// 遅延実行されるだけなので、待ち時間の許容のため ctx は Background。
+	var hash []byte
+	if err := withArgon2Slot(context.Background(), func() error {
+		hash = argon2.IDKey(secret, salt, argon2Time, argon2Memory, argon2Threads, passwordHashBytes)
+		return nil
+	}); err != nil {
+		return "", err
+	}
 	defer Zero(hash)
 
 	return encodePHC(argon2Params{Memory: argon2Memory, Time: argon2Time, Threads: argon2Threads}, salt, hash), nil

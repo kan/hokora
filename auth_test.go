@@ -57,11 +57,12 @@ func TestVerifyMachineCredentials(t *testing.T) {
 		{name: "unknown client id", clientID: "does-not-exist", secret: "whatever", wantErr: ErrInvalidCredentials},
 		// client_id が空でも、正しい secret を添えて通ってはならない。
 		{name: "empty client id", clientID: "", wantErr: ErrInvalidCredentials},
-		// **disabled は「存在しない」と同じ応答に潰す**(auth.go の doc)。
-		// 区別すると、無効化済みの client_id を列挙できてしまう。
+		// **disabled は内部的に errMachineDisabled を返す**(監査 detail 用)。
+		// HTTP 応答は verifyForToken が invalid_credentials に潰すので区別は
+		// 漏れない(そちらは handler レベルのテストで固定する)。
 		// **secret は正しいものを渡す。** 間違った secret で試すと、disabled の
 		// 検査が消えてもテストは通ってしまう。
-		{name: "disabled machine", clientID: clientID, disabled: true, wantErr: ErrInvalidCredentials},
+		{name: "disabled machine", clientID: clientID, disabled: true, wantErr: errMachineDisabled},
 		// **dummy hash の原像を送っても、存在しない client_id は通らない。**
 		// 比較の成否だけで分岐する実装をここで落とす。
 		{name: "dummy hash preimage against an unknown client id",

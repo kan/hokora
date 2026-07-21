@@ -357,3 +357,58 @@ func TestKeyringEndToEnd(t *testing.T) {
 		t.Fatal("round trip mismatch")
 	}
 }
+
+// ---- keyringWrappingEqual(F: Unseal の TOCTOU 対策の核心) ----
+
+// keyringWrappingEqual は Unseal が「公開直前に読み直した keyring」と
+// 「検証に使った keyring」を比較するために使う。ラップ(salt / 包んだ DEK /
+// nonce)のいずれか 1 つでも変わっていれば false を返さなければならない。
+// これが緩んだり削られたりすると、rotate-master の直後に旧 MK での unseal が
+// すり抜けうる(keyring.go の Unseal のコメント参照)。
+//
+// **argon2 を使わない。** testKeyringRow(store_test.go) で組み立てた素の
+// バイト列を比較するだけなので、決定的かつ高速である。
+func TestKeyringWrappingEqual(t *testing.T) {
+	t.Parallel()
+
+	base := testKeyringRow(InitialDEKVersion)
+
+	t.Run("identical wrapping compares equal", func(t *testing.T) {
+		t.Parallel()
+
+		other := testKeyringRow(InitialDEKVersion)
+		if !keyringWrappingEqual(base, other) {
+			t.Error("identical wrappings compared unequal")
+		}
+	})
+
+	t.Run("different kdf salt compares unequal", func(t *testing.T) {
+		t.Parallel()
+
+		other := testKeyringRow(InitialDEKVersion)
+		other.KDFSalt = flipByte(other.KDFSalt, 0)
+		if keyringWrappingEqual(base, other) {
+			t.Error("a changed kdf salt compared equal")
+		}
+	})
+
+	t.Run("different wrapped dek compares unequal", func(t *testing.T) {
+		t.Parallel()
+
+		other := testKeyringRow(InitialDEKVersion)
+		other.DEKWrapped = flipByte(other.DEKWrapped, 0)
+		if keyringWrappingEqual(base, other) {
+			t.Error("a changed wrapped dek compared equal")
+		}
+	})
+
+	t.Run("different dek nonce compares unequal", func(t *testing.T) {
+		t.Parallel()
+
+		other := testKeyringRow(InitialDEKVersion)
+		other.DEKNonce = flipByte(other.DEKNonce, 0)
+		if keyringWrappingEqual(base, other) {
+			t.Error("a changed dek nonce compared equal")
+		}
+	})
+}

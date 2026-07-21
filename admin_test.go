@@ -352,6 +352,62 @@ func TestAdminRotateMasterOversizedBody(t *testing.T) {
 	}
 }
 
+// I: parseRotateBody は各行に §6.1 の正規化(行末 CR の除去)を適用する。
+//
+// rotate-master のボディは改行区切り 2 行だが、Windows 由来の貼り付けで
+// 行区切りが CRLF になることがある。"\n" で split すると、行末に "\r" が
+// 残った状態で DecodeMasterKey に渡ってしまい、DecodeMasterKey は行中の
+// CR/LF を一切許さない(折り返し MK 対策)ため、正しい MK でも誤解を招く
+// 「invalid master key」になっていた。
+func TestParseRotateBodyCRLF(t *testing.T) {
+	t.Parallel()
+
+	mk1, err := GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	mk2, err := GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	body := []byte(EncodeMasterKey(mk1) + "\r\n" + EncodeMasterKey(mk2) + "\r\n")
+	oldMK, newMK, err := parseRotateBody(body)
+	if err != nil {
+		t.Fatalf("parseRotateBody with CRLF line endings: %v", err)
+	}
+	if !bytes.Equal(oldMK, mk1) {
+		t.Errorf("oldMK = %x, want %x", oldMK, mk1)
+	}
+	if !bytes.Equal(newMK, mk2) {
+		t.Errorf("newMK = %x, want %x", newMK, mk2)
+	}
+}
+
+// **行末以外(鍵の途中)に紛れ込んだ CR は、引き続き拒否される。** trailing
+// CR の除去は「行区切りが CRLF だった」ケースだけを救うものであり、鍵の
+// 内容そのものへの寛容さを増やすものではない。
+func TestParseRotateBodyRejectsInteriorCR(t *testing.T) {
+	t.Parallel()
+
+	mk1, err := GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	mk2, err := GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	encoded := EncodeMasterKey(mk1)
+	withInteriorCR := encoded[:10] + "\r" + encoded[10:]
+	body := []byte(withInteriorCR + "\n" + EncodeMasterKey(mk2) + "\n")
+
+	if _, _, err := parseRotateBody(body); err == nil {
+		t.Fatal("parseRotateBody accepted a key with an interior CR")
+	}
+}
+
 // **seal は fail open。** 監査 DB が壊れていても、口の側で止めてはならない
 // (THREAT_MODEL §10.4)。Vault 単体ではなく HTTP ハンドラでも確かめる。
 func TestAdminSealSucceedsWhenAuditIsBroken(t *testing.T) {

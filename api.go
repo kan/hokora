@@ -130,10 +130,19 @@ func (a *machineAPI) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 func (a *machineAPI) verifyForToken(ctx context.Context, req authTokenRequest, remoteAddr string, now time.Time) (int64, error) {
 	machine, err := verifyMachineCredentials(ctx, a.db, req.ClientID, req.ClientSecret)
 	if err != nil {
-		if !errors.Is(err, ErrInvalidCredentials) {
-			return 0, err
+		// **応答はどちらも invalid_credentials に潰す**(区別を漏らさない)。
+		// 監査 detail の理由だけを分ける: disabled(退役済み machine の設定ミス)
+		// と invalid_credentials(総当たり等)を運用側で見分けられるように。
+		var reason string
+		switch {
+		case errors.Is(err, errMachineDisabled):
+			reason = ReasonDisabled
+		case errors.Is(err, ErrInvalidCredentials):
+			reason = ReasonInvalidCredentials
+		default:
+			return 0, err // DB 障害等。認証は通さない。
 		}
-		if auditErr := a.recordAuthFailure(ctx, req.ClientID, remoteAddr, now, ReasonInvalidCredentials); auditErr != nil {
+		if auditErr := a.recordAuthFailure(ctx, req.ClientID, remoteAddr, now, reason); auditErr != nil {
 			return 0, auditErr
 		}
 		return 0, ErrInvalidCredentials
@@ -224,15 +233,17 @@ func (a *machineAPI) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 
 	key := r.PathValue("key")
 	// key の形式検査を先に行う。**エラーに値を載せない**ため、結果は捨てる。
+	// **失敗した read も監査する**(ルール 22)。認証済みの主体が拒否された
+	// 事実は denySecretAccess で記録する(list エンドポイントと揃える)。
 	if err := ValidateItemKey(key); err != nil {
-		a.writeError(w, http.StatusForbidden, "forbidden")
+		a.denySecretAccess(w, r, req.machineID, req.now)
 		return
 	}
 
 	secret, err := GetEncryptedSecret(r.Context(), a.db, req.env.EnvironmentID, key)
 	if errors.Is(err, ErrNotFound) {
 		// 存在しない key と grant なしを区別しない(ルール 54 と同じ理由)。
-		a.writeError(w, http.StatusForbidden, "forbidden")
+		a.denySecretAccess(w, r, req.machineID, req.now)
 		return
 	}
 	if err != nil {
@@ -363,6 +374,13 @@ func (a *machineAPI) denySecretAccess(w http.ResponseWriter, r *http.Request, ma
 // 逆順にすると「返せなかった読み取り」が success として残る。
 func (a *machineAPI) decryptAndRecord(w http.ResponseWriter, r *http.Request, req authorizedRequest, secrets []EncryptedSecret) (map[string]string, bool) {
 	values, err := a.decryptAll(secrets)
+	if errors.Is(err, ErrSealed) {
+		// authorize 通過後に seal が完了した競合窓。**500 ではなく 503** を返し、
+		// SDK の ErrSealed マッピングに乗せる(通常は seal 時のトークン全削除で
+		// 401 になるため、この窓は極小)。
+		a.writeError(w, http.StatusServiceUnavailable, "sealed")
+		return nil, false
+	}
 	if err != nil {
 		a.internalError(w, r, "decrypt secrets", err)
 		return nil, false

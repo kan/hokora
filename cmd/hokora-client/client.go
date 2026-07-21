@@ -108,7 +108,11 @@ func cmdGet(ctx context.Context, args []string) error {
 		return fmt.Errorf("get: %w", err)
 	}
 
-	secrets, err := client.Fetch(ctx)
+	// **単一キー取得を使う**(bulk Fetch ではない)。get 1 件で grant 内の全
+	// キーを read・監査してしまうと、監査ログが実態と乖離する(THREAT_MODEL
+	// §10.5: success は「漏洩したかもしれない」記録)。存在しないキーは grant
+	// なしと同じ forbidden になる(サーバーが存在情報を漏らさない)。
+	secrets, err := client.FetchKey(ctx, key)
 	if err != nil {
 		return fmt.Errorf("get: %w", err)
 	}

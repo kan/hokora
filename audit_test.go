@@ -194,7 +194,7 @@ func TestAuditAllowlistAcceptsEveryDefinedAction(t *testing.T) {
 	actions := []Action{
 		ActionSecretRead, ActionSecretWrite, ActionSecretDelete, ActionSecretReveal,
 		ActionUnsealAttempt, ActionSeal, ActionMasterRotate,
-		ActionAuthMachine, ActionAuthUser, ActionLogout,
+		ActionAuthMachine, ActionAuthUser, ActionLogout, ActionCSRFReject,
 		ActionUserCreate, ActionUserDisable, ActionUserPasswordChange,
 		ActionMachineCreate, ActionMachineDisable, ActionMachineRotateSecret,
 		ActionGrantCreate, ActionGrantDelete,
@@ -220,8 +220,8 @@ func TestAuditReasonAllowlist(t *testing.T) {
 
 	store := newTestStore(t)
 	reasons := []string{
-		ReasonInvalidCredentials, ReasonRateLimited, ReasonForbidden, ReasonSealed,
-		ReasonDisabled, ReasonExpired, ReasonInvalidCSRF, ReasonInvalidMasterKey,
+		ReasonInvalidCredentials, ReasonRateLimited, ReasonForbidden,
+		ReasonDisabled, ReasonInvalidCSRF, ReasonInvalidMasterKey,
 	}
 	if len(reasons) != len(auditReasons) {
 		t.Fatalf("allowlist has %d reasons but the test covers %d", len(auditReasons), len(reasons))

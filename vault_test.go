@@ -360,6 +360,81 @@ func TestVaultRotateMasterFailsClosedWhenAuditIsBroken(t *testing.T) {
 	Zero(dek)
 }
 
+// F: rotate-master の直後に旧 MK で Unseal を試みると、必ず ErrDecrypt で
+// 失敗し、監査には失敗行が 1 つだけ残る(旧 MK 由来の success 行が紛れ込まない)。
+//
+// **このシーケンス単体は、Unseal 内の TOCTOU 再読ゲート(keyringWrappingEqual)
+// を削るリグレッションを検出しない。** LoadKeyring の最初の呼び出しの時点で
+// 既にローテート後の keyring を読むため、再読ゲートの有無に関わらず同じ
+// ErrDecrypt になる(そちらは keyring_test.go の TestKeyringWrappingEqual と、
+// 本ファイルの TestVaultUnsealRejectsStaleKeyringDuringRotateRace が担う)。
+// ここで固定するのは、より一般的な不変条件:「rotate 後、Vault.Unseal 経由で
+// 旧 MK は確実に拒否され、監査が矛盾した状態(success 行が残る)にならない」
+// である。
+func TestVaultUnsealRejectsOldMasterKeyAfterRotate(t *testing.T) {
+	t.Parallel()
+
+	v, store, oldMK := newTestVault(t)
+	unsealForTest(t, v, oldMK)
+	v.Seal(t.Context(), socketAudit(vaultNow))
+
+	newMK, err := GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	if err := v.RotateMaster(t.Context(), oldMK, newMK, socketAudit(vaultNow)); err != nil {
+		t.Fatalf("RotateMaster: %v", err)
+	}
+
+	if err := v.Unseal(t.Context(), oldMK, socketAudit(vaultNow)); !errors.Is(err, ErrDecrypt) {
+		t.Fatalf("Unseal(old master key) after rotate = %v, want ErrDecrypt", err)
+	}
+	if got := v.Status(); got.State != StateSealed {
+		t.Fatalf("state = %v, want sealed", got.State)
+	}
+
+	// 監査: 最初の unseal(成功)1 行 + 今回の失敗 1 行だけ。旧 MK での
+	// unseal 試行が success として紛れ込んでいないこと。
+	if n := countAuditLogs(t, store.DB(), ActionUnsealAttempt); n != 2 {
+		t.Fatalf("%d unseal audit rows, want 2 (1 success + 1 failure)", n)
+	}
+
+	rows, err := store.DB().QueryContext(t.Context(),
+		`SELECT result, detail FROM audit_logs WHERE action = ?`, string(ActionUnsealAttempt))
+	if err != nil {
+		t.Fatalf("query audit rows: %v", err)
+	}
+	defer rows.Close()
+
+	var successes, failures int
+	for rows.Next() {
+		var result, detail string
+		if err := rows.Scan(&result, &detail); err != nil {
+			t.Fatalf("scan audit row: %v", err)
+		}
+		switch result {
+		case string(ResultSuccess):
+			successes++
+		case string(ResultFailure):
+			failures++
+			if !strings.Contains(detail, `"reason":"`+ReasonInvalidMasterKey+`"`) {
+				t.Errorf("failure detail = %q, want reason %q", detail, ReasonInvalidMasterKey)
+			}
+		default:
+			t.Errorf("unexpected result %q", result)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate audit rows: %v", err)
+	}
+	if successes != 1 {
+		t.Errorf("%d unseal success rows, want exactly 1 (the initial unseal only)", successes)
+	}
+	if failures != 1 {
+		t.Errorf("%d unseal failure rows, want exactly 1", failures)
+	}
+}
+
 // ---- rotate-master(DESIGN §6.7) ----
 
 func TestVaultRotateMaster(t *testing.T) {

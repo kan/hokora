@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -230,11 +231,6 @@ func (v *Vault) Unseal(ctx context.Context, mk []byte, ac auditCtx) (err error) 
 		}
 	}()
 
-	// 監査を先に確定させる。ここで失敗したら unsealed にしない(fail closed)。
-	if err := RecordAudit(ctx, v.db, ac.entry(ActionUnsealAttempt, ResultSuccess, nil)); err != nil {
-		return err
-	}
-
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.state == StateUnsealed {
@@ -243,10 +239,46 @@ func (v *Vault) Unseal(ctx context.Context, mk []byte, ac auditCtx) (err error) 
 		Zero(dek)
 		return ErrAlreadyUnsealed
 	}
+
+	// **公開前に keyring を再読し、検証に使った版と一致するか確かめる**(C9 と
+	// 同型の TOCTOU 対策)。rotate-master は rotateMu で直列化されるが Vault の
+	// ロックは取らないため、LoadKeyring(上)と公開(ここ)の間に MK が
+	// ローテートされうる。旧 MK でアンラップした結果を、ローテート後の状態で
+	// 公開すると、失効したはずの旧 MK での unseal が成立してしまう。
+	fresh, err2 := LoadKeyring(ctx, v.db)
+	if err2 != nil {
+		Zero(dek)
+		return err2
+	}
+	if !keyringWrappingEqual(fresh, kr) {
+		// ローテートされた。旧 MK はもう有効ではない。ErrDecrypt 扱いにして
+		// 失敗を監査する(旧 MK が誤りになったのと同じ)。
+		Zero(dek)
+		return ErrDecrypt
+	}
+
+	// **成功の監査は再読ゲートを通ってから確定させる**(fail closed)。ゲート前に
+	// 記録すると、ローテート衝突で unseal を却下したとき「success の後に
+	// failure」という矛盾した 2 行が残り、成立しなかった unseal の success が
+	// 監査に残る。ここで失敗したら unsealed にしない。
+	if err := RecordAudit(ctx, v.db, ac.entry(ActionUnsealAttempt, ResultSuccess, nil)); err != nil {
+		Zero(dek)
+		return err
+	}
+
 	v.state = StateUnsealed
 	v.dek = dek
 	v.dekVersion = kr.DEKVersion
 	return nil
+}
+
+// keyringWrappingEqual は 2 つの keyring のラップ(salt / 包んだ DEK / nonce)が
+// 一致するかを返す。rotate-master はこの 3 つを差し替えるので、一致しなければ
+// その間にローテートが確定したことを意味する。
+func keyringWrappingEqual(a, b *Keyring) bool {
+	return bytes.Equal(a.KDFSalt, b.KDFSalt) &&
+		bytes.Equal(a.DEKWrapped, b.DEKWrapped) &&
+		bytes.Equal(a.DEKNonce, b.DEKNonce)
 }
 
 // Seal は DEK を破棄し、sealed 状態に戻す。

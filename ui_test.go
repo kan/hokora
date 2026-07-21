@@ -281,6 +281,43 @@ func TestUIPostsRequireCSRF(t *testing.T) {
 	}
 }
 
+// C: CSRF 拒否は監査される(ルール 22/26)。actor は拒否されたセッションの
+// user、理由は invalid_csrf。fail open(拒否そのものはどのみち確定して
+// いるので、記録できなくても 403 のまま)。
+func TestUICSRFRejectionIsAudited(t *testing.T) {
+	t.Parallel()
+
+	f := newUIFixture(t)
+	f.unseal(t)
+
+	// トークン無しの POST。
+	if w := f.do(t, http.MethodPost, "/ui/logout", url.Values{}, true); w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+
+	var (
+		actor  string
+		userID sql.NullInt64
+		detail string
+	)
+	if err := f.store.DB().QueryRowContext(t.Context(), `
+		SELECT actor, actor_user_id, COALESCE(detail, '') FROM audit_logs
+		WHERE action = ? AND result = ?`,
+		string(ActionCSRFReject), string(ResultFailure)).Scan(&actor, &userID, &detail); err != nil {
+		t.Fatalf("select audit row: %v", err)
+	}
+
+	if want := actorUser(f.userID); actor != want {
+		t.Errorf("actor = %q, want %q", actor, want)
+	}
+	if !userID.Valid || userID.Int64 != f.userID {
+		t.Errorf("actor_user_id = %v, want %d", userID, f.userID)
+	}
+	if !strings.Contains(detail, `"reason":"`+ReasonInvalidCSRF+`"`) {
+		t.Errorf("detail = %q, want reason = %q", detail, ReasonInvalidCSRF)
+	}
+}
+
 // ---- 初回フロー(DESIGN §8.3) ----
 
 // **must_change_pw ならパスワード変更へ送られる。**
@@ -1406,4 +1443,61 @@ func TestUILoginIsRateLimitedByIPFirst(t *testing.T) {
 func (f *uiFixture) ipLimits(perIP, perUsername int) {
 	f.ui.ipLimiter = newRateLimiter(perIP, 0)
 	f.ui.usernameLimiter = newRateLimiter(perUsername, 0)
+}
+
+// C: 第二段(username)のレート制限に引っかかった試行も監査される
+// (auth.user / failure / reason=rate_limited)。第一段(IP)は未認証トラフィック
+// で監査 DB を膨らませないために記録しない ── ここでは第二段だけを見る。
+// **生の username は subject_digest に潰す**(ルール 25)。
+func TestUILoginUsernameRateLimitIsAudited(t *testing.T) {
+	t.Parallel()
+
+	f := newUIFixture(t)
+	f.ipLimits(100, 1)
+
+	attempt := func(username, remoteAddr string) int {
+		form := url.Values{"username": {username}, "password": {"wrong-password"}}
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/ui/login",
+			strings.NewReader(form.Encode()))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		r.Header.Set("Sec-Fetch-Site", "same-origin")
+		r.Host = "hokora.internal:8443"
+		r.RemoteAddr = remoteAddr
+
+		w := httptest.NewRecorder()
+		withUIHeaders(f.ui.uiMux()).ServeHTTP(w, r)
+		return w.Code
+	}
+
+	// 1 回目は Login() 自身が invalid_credentials で監査する(通常のログイン
+	// 失敗)。2 回目で username の枠を使い切り、rate_limited が記録される。
+	if got := attempt(testUsername, "10.8.0.20:51234"); got != http.StatusUnauthorized {
+		t.Fatalf("the first attempt = %d, want 401", got)
+	}
+	if got := attempt(testUsername, "10.8.0.21:51234"); got != http.StatusTooManyRequests {
+		t.Fatalf("the second attempt (same username, another ip) = %d, want 429", got)
+	}
+
+	// **直近の行を見る。** 1 回目の invalid_credentials 行と混同しないため。
+	var actor, detail string
+	if err := f.store.DB().QueryRowContext(t.Context(), `
+		SELECT actor, COALESCE(detail, '') FROM audit_logs
+		WHERE action = ? AND result = ?
+		ORDER BY id DESC LIMIT 1`,
+		string(ActionAuthUser), string(ResultFailure)).Scan(&actor, &detail); err != nil {
+		t.Fatalf("select audit row: %v", err)
+	}
+
+	if actor != ActorAnonymous {
+		t.Errorf("actor = %q, want %q", actor, ActorAnonymous)
+	}
+	if !strings.Contains(detail, `"reason":"`+ReasonRateLimited+`"`) {
+		t.Errorf("detail = %q, want reason = %q", detail, ReasonRateLimited)
+	}
+	if strings.Contains(detail, testUsername) {
+		t.Errorf("detail contains the raw username: %q", detail)
+	}
+	if !strings.Contains(detail, subjectDigest(testUsername)) {
+		t.Errorf("detail = %q, want it to contain the subject digest", detail)
+	}
 }

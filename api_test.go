@@ -338,6 +338,42 @@ func TestAPIAuthFailureAuditDoesNotStoreRawClientID(t *testing.T) {
 	}
 }
 
+// D: disabled な machine が **正しい** secret で認証しても、応答は
+// wrong-secret と同じ invalid_credentials(401)である(区別を漏らさない)。
+// **監査 detail だけは reason=disabled で残り**、運用側で「退役済み machine
+// の設定ミス」と「総当たり」を区別できる。
+func TestAPIAuthFailureForDisabledMachineIsIndistinguishableButAudited(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	if err := DisableMachine(t.Context(), f.vault, f.machineID,
+		auditCtx{Actor: ActorAnonymous, Now: vaultNow}); err != nil {
+		t.Fatalf("DisableMachine: %v", err)
+	}
+
+	// **secret は正しいものを渡す。** 間違った secret で試すと、disabled の
+	// 検査が消えてもテストは通ってしまう(auth_test.go の同種の注意と同じ)。
+	w := f.do(t, http.MethodPost, "/v1/auth/token", "",
+		authTokenRequest{ClientID: f.clientID, ClientSecret: f.secret})
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (body %q)", w.Code, w.Body.String())
+	}
+	if got := decodeAPIError(t, w); got != "invalid_credentials" {
+		t.Errorf("error = %q, want invalid_credentials (disabled must not be distinguishable)", got)
+	}
+
+	var detail string
+	if err := f.store.DB().QueryRowContext(t.Context(), `
+		SELECT detail FROM audit_logs WHERE action = ? AND result = ?`,
+		string(ActionAuthMachine), string(ResultFailure),
+	).Scan(&detail); err != nil {
+		t.Fatalf("select audit row: %v", err)
+	}
+	if !strings.Contains(detail, `"reason":"`+ReasonDisabled+`"`) {
+		t.Errorf("detail = %q, want reason = %q", detail, ReasonDisabled)
+	}
+}
+
 // 認証成功で last_auth_at が入る(運用上「いつ最後に使われたか」を追える)。
 func TestAPIAuthUpdatesLastAuthAt(t *testing.T) {
 	t.Parallel()
@@ -669,6 +705,50 @@ func TestAPISecretReadFailsClosedWhenAuditIsBroken(t *testing.T) {
 	// **平文が漏れていないこと。**
 	if strings.Contains(w.Body.String(), "postgres://") {
 		t.Errorf("the response leaked a secret: %q", w.Body.String())
+	}
+}
+
+// H: authorize() を通過した後に seal が完了する競合窓では、復号が
+// ErrSealed を返す。この場合は 500 ではなく **503**(SDK の ErrSealed
+// マッピングに乗る)を返さなければならない。通常は seal 時にトークンを
+// 全て消すため 401 になる、極小の窓を狙ったものである。
+//
+// 実際のリクエスト処理の途中で別ゴルーチンが seal するタイミングを狙うのは
+// 非決定的なので、decryptAndRecord を直接呼び、既に sealed な Vault を渡して
+// 「authorize は通ったが、復号する時点では sealed だった」状態を決定的に
+// 再現する。
+func TestAPIDecryptAndRecordReturns503WhenSealedRaceOccurs(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.vault.Seal(t.Context(), socketAudit(vaultNow))
+
+	req := authorizedRequest{
+		machineID:  f.machineID,
+		remoteAddr: "10.0.0.2",
+		now:        vaultNow,
+		env: &EnvironmentRef{
+			ProjectID: f.projectID, EnvironmentID: f.environmentID,
+			ProjectSlug: testProjectSlug, EnvSlug: testEnvSlug,
+		},
+	}
+	// sealed なら中身を見る前に WithDEK が ErrSealed を返すので、暗号文の
+	// 中身は不要。
+	secrets := []EncryptedSecret{{ItemID: 1, Key: "DATABASE_URL"}}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet,
+		secretsPath(testProjectSlug, testEnvSlug), nil)
+
+	values, ok := f.api.decryptAndRecord(w, r, req, secrets)
+	if ok {
+		t.Fatalf("decryptAndRecord succeeded while sealed: %v", values)
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body %q)", w.Code, w.Body.String())
+	}
+	if got := decodeAPIError(t, w); got != "sealed" {
+		t.Errorf("error = %q, want %q", got, "sealed")
 	}
 }
 

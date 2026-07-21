@@ -188,6 +188,11 @@ type fakeServer struct {
 	secrets      map[string]string
 	sealed       bool
 	authCalls    int
+	// secretsCalls / secretsKeyCalls は、それぞれ一括取得(GET /v1/secrets)と
+	// 単一キー取得(GET /v1/secrets/{key})が呼ばれた回数である。FetchKey が
+	// 実際に単一キーのエンドポイントしか叩かないことを検査するのに使う。
+	secretsCalls    int
+	secretsKeyCalls int
 }
 
 func (f *fakeServer) handler(t *testing.T) http.Handler {
@@ -215,6 +220,7 @@ func (f *fakeServer) handler(t *testing.T) http.Handler {
 		writeJSON(t, w, http.StatusOK, map[string]any{"token": f.token, "expires_in": 900})
 	})
 	mux.HandleFunc("GET /v1/secrets", func(w http.ResponseWriter, r *http.Request) {
+		f.secretsCalls++
 		if r.Header.Get("Authorization") != "Bearer "+f.token {
 			writeJSON(t, w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
 			return
@@ -227,6 +233,32 @@ func (f *fakeServer) handler(t *testing.T) http.Handler {
 			"project": r.URL.Query().Get("project"),
 			"env":     r.URL.Query().Get("env"),
 			"secrets": f.secrets,
+		})
+	})
+	// 単一キー取得(FetchKey が使う)。存在しないキーは bulk と違って
+	// "無い" とは言わず、grant なしと同じ forbidden に潰す(サーバーが
+	// 存在情報を漏らさない)。
+	mux.HandleFunc("GET /v1/secrets/{key}", func(w http.ResponseWriter, r *http.Request) {
+		f.secretsKeyCalls++
+		if r.Header.Get("Authorization") != "Bearer "+f.token {
+			writeJSON(t, w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+			return
+		}
+		if r.URL.Query().Get("project") == "" || r.URL.Query().Get("env") == "" {
+			writeJSON(t, w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		key := r.PathValue("key")
+		value, ok := f.secrets[key]
+		if !ok {
+			writeJSON(t, w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"project": r.URL.Query().Get("project"),
+			"env":     r.URL.Query().Get("env"),
+			"key":     key,
+			"value":   value,
 		})
 	})
 	return mux
@@ -318,6 +350,107 @@ func TestFetchErrors(t *testing.T) {
 			t.Fatalf("error = %v, want ErrSealed", err)
 		}
 	})
+}
+
+// ---- A: FetchKey(単一キー取得) ----
+
+// FetchKey は単一キーのエンドポイントだけを叩き、bulk(GET /v1/secrets)には
+// 一度も触れない。get 1 件のために grant 内の全キーを read・監査してしまう
+// と、監査ログが実態(「このキーが読まれた」)と乖離する
+// (cmd/hokora-client の cmdGet が bulk Fetch から FetchKey に切り替わった
+// 理由と同じ。THREAT_MODEL §10.5)。
+func TestFetchKey(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeServer{
+		clientID: "app-prod", clientSecret: "s3cr3t", token: "tok-123",
+		secrets: map[string]string{"DATABASE_URL": "postgres://x", "API_TOKEN": "t0ken"},
+	}
+	client := newFakeClient(t, f)
+
+	secrets, err := client.FetchKey(t.Context(), "DATABASE_URL")
+	if err != nil {
+		t.Fatalf("FetchKey: %v", err)
+	}
+	if secrets.Len() != 1 {
+		t.Fatalf("Len = %d, want 1 (only the requested key)", secrets.Len())
+	}
+	if v, ok := secrets.GetString("DATABASE_URL"); !ok || v != "postgres://x" {
+		t.Errorf("DATABASE_URL = %q (ok=%v)", v, ok)
+	}
+
+	if f.secretsCalls != 0 {
+		t.Errorf("bulk GET /v1/secrets was called %d times, want 0", f.secretsCalls)
+	}
+	if f.secretsKeyCalls != 1 {
+		t.Errorf("GET /v1/secrets/{key} was called %d times, want 1", f.secretsKeyCalls)
+	}
+}
+
+func TestFetchKeyErrors(t *testing.T) {
+	t.Parallel()
+
+	// 存在しないキーは、grant なしと同じ forbidden に潰される
+	// (サーバーが存在情報を漏らさない。ルール 54 と同じ理由)。
+	t.Run("unknown key maps to ErrForbidden", func(t *testing.T) {
+		t.Parallel()
+
+		f := &fakeServer{
+			clientID: "id", clientSecret: "sec", token: "tok",
+			secrets: map[string]string{"DATABASE_URL": "postgres://x"},
+		}
+		client := newFakeClient(t, f)
+
+		if _, err := client.FetchKey(t.Context(), "NOPE"); !errors.Is(err, ErrForbidden) {
+			t.Fatalf("error = %v, want ErrForbidden", err)
+		}
+	})
+
+	t.Run("wrong secret maps to ErrUnauthorized", func(t *testing.T) {
+		t.Parallel()
+
+		f := &fakeServer{clientID: "id", clientSecret: "right", token: "t"}
+		client := newFakeClient(t, f, WithCredentials("id", "wrong"))
+
+		if _, err := client.FetchKey(t.Context(), "DATABASE_URL"); !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("error = %v, want ErrUnauthorized", err)
+		}
+	})
+}
+
+// ---- G: https:// の強制 ----
+
+// New はサーバーアドレスに https:// しか許さない。TLS を無効化する手段は
+// 提供しない(AGENTS.md ルール 31、THREAT_MODEL §5.2)。http:// の設定ミスや
+// タイプミスで client_secret / トークン / secret 値が平文で流れるのを防ぐ。
+func TestNewRejectsNonHTTPSAddress(t *testing.T) {
+	t.Parallel()
+
+	_, err := New(
+		WithAddress("http://hokora.example.com:9443"),
+		WithCredentials("id", "sec"),
+		WithProject("myapp"), WithEnv("prod"),
+	)
+	if !errors.Is(err, ErrMissingConfig) {
+		t.Fatalf("error = %v, want ErrMissingConfig", err)
+	}
+}
+
+// https:// のアドレスは受理される(スキームの検査以外は落ちないこと)。
+func TestNewAcceptsHTTPSAddress(t *testing.T) {
+	t.Parallel()
+
+	client, err := New(
+		WithAddress("https://hokora.example.com:9443"),
+		WithCredentials("id", "sec"),
+		WithProject("myapp"), WithEnv("prod"),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if client == nil {
+		t.Fatal("New returned a nil client")
+	}
 }
 
 // **InsecureSkipVerify を提供しない。** 自己署名を信頼するには CA を積む

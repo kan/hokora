@@ -74,6 +74,27 @@ func (f *fakeServer) handler(t *testing.T) http.Handler {
 			"project": testProject, "env": testEnv, "secrets": f.secrets,
 		})
 	})
+	// 単一キー取得(cmdGet はこちらを使う)。存在しないキー・grant 不一致は
+	// どちらも 403 に潰す(サーバーが存在情報を漏らさない)。
+	mux.HandleFunc("GET /v1/secrets/{key}", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+testToken {
+			writeJSON(t, w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+			return
+		}
+		if r.URL.Query().Get("project") != testProject || r.URL.Query().Get("env") != testEnv {
+			writeJSON(t, w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		key := r.PathValue("key")
+		value, ok := f.secrets[key]
+		if !ok {
+			writeJSON(t, w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"project": testProject, "env": testEnv, "key": key, "value": value,
+		})
+	})
 	return mux
 }
 
@@ -139,12 +160,14 @@ func TestCmdGet(t *testing.T) {
 	}
 }
 
+// 存在しないキーは、単一キー取得だと **grant なしと同じ forbidden** になる
+// (サーバーが存在情報を漏らさない。bulk 取得のように「無い」とは言わない)。
 func TestCmdGetUnknownKey(t *testing.T) {
 	s := newClientTestServer(t)
 
 	err := cmdGet(context.Background(), s.args("NOPE"))
-	if err == nil || !strings.Contains(err.Error(), "NOPE") {
-		t.Fatalf("error = %v, want it to name the missing key", err)
+	if !errors.Is(err, sdk.ErrForbidden) {
+		t.Fatalf("error = %v, want sdk.ErrForbidden", err)
 	}
 }
 

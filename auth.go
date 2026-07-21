@@ -28,6 +28,12 @@ var (
 	// 区別すると、有効な client_id の一覧を作れてしまう。
 	ErrInvalidCredentials = errors.New("invalid credentials")
 
+	// errMachineDisabled は「正しい credential だが machine が無効」を示す
+	// **内部専用**のエラーである。HTTP 応答は ErrInvalidCredentials と同一に
+	// 潰す(区別を漏らさない)が、監査 detail には ReasonDisabled を残して、
+	// 退役済み machine の設定ミスと総当たりを運用側で区別できるようにする。
+	errMachineDisabled = errors.New("machine is disabled")
+
 	// ErrForbidden は認可されていないことを示す。grant なし・論理削除済み・
 	// 存在しないのいずれもこれに潰す(AGENTS.md ルール 54)。
 	ErrForbidden = errors.New("forbidden")
@@ -115,8 +121,12 @@ func verifyMachineCredentials(ctx context.Context, q querier, clientID, secret s
 	ok := constantTimeEqual(hashClientSecret(secret), want)
 
 	switch {
-	case machine == nil, !ok, machine.Disabled:
+	case machine == nil, !ok:
 		return nil, ErrInvalidCredentials
+	case machine.Disabled:
+		// 正しい credential だが無効。応答は invalid_credentials と同一に
+		// 潰す(呼び出し側で変換)が、監査には disabled を残す。
+		return nil, errMachineDisabled
 	default:
 		return machine, nil
 	}

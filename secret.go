@@ -45,6 +45,13 @@ func (r secretRef) auditEntry(ac auditCtx, action Action, result Result, version
 // 確定させない。
 //
 // 暗号化は Vault の read lock 内で完結させる(C1)。DEK を fn の外へ持ち出さない。
+//
+// **ロック獲得順序: Vault.mu(read) → SQLite 書き込みロック**(C7 の拡張)。
+// WithDEK で read lock を取ってから withTx を開く。逆順(DB tx を開いてから
+// Vault ロックを取る)にすると、Vault の write lock を保持する revoke 系
+// (machine.disable / rotate_secret)と順序が逆転し、新規 key の書き込みと
+// 緊急遮断が SQLITE_BUSY で衝突しうる。**DB tx を開いている間に Vault の
+// ロックを取らない。**
 func PutSecret(ctx context.Context, v *Vault, env *EnvironmentRef, key string, value []byte, ac auditCtx) error {
 	if err := ValidateItemKey(key); err != nil {
 		return err
@@ -54,42 +61,38 @@ func PutSecret(ctx context.Context, v *Vault, env *EnvironmentRef, key string, v
 		return err
 	}
 
-	return withTx(ctx, v.db, func(tx *sql.Tx) error {
-		itemID, version, err := nextItemVersion(ctx, tx, env.EnvironmentID, key, ac.Now)
-		if err != nil {
-			return err
-		}
-
-		// 暗号化してから INSERT する。sealed なら ErrSealed が返り、
-		// トランザクションごと巻き戻る。
-		var ciphertext, nonce []byte
-		var dekVersion int64
-		if err := v.WithDEK(func(dek []byte, dv int64) error {
-			aad, err := itemAAD(itemID, version, dv)
+	// 先に read lock を取る。sealed なら withTx を開く前に ErrSealed で戻る。
+	return v.WithDEK(func(dek []byte, dekVersion int64) error {
+		return withTx(ctx, v.db, func(tx *sql.Tx) error {
+			itemID, version, err := nextItemVersion(ctx, tx, env.EnvironmentID, key, ac.Now)
 			if err != nil {
 				return err
 			}
-			ciphertext, nonce, err = sealBytes(dek, value, aad)
-			dekVersion = dv
-			return err
-		}); err != nil {
-			return err
-		}
 
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO item_versions (item_id, version, value_enc, nonce, dek_version, created_at, created_by)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			itemID, version, ciphertext, nonce, dekVersion, ac.Now.Unix(), ac.Actor); err != nil {
-			return fmt.Errorf("insert item version: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE items SET current_version = ?, updated_at = ? WHERE id = ?`,
-			version, ac.Now.Unix(), itemID); err != nil {
-			return fmt.Errorf("update item: %w", err)
-		}
+			aad, err := itemAAD(itemID, version, dekVersion)
+			if err != nil {
+				return err
+			}
+			ciphertext, nonce, err := sealBytes(dek, value, aad)
+			if err != nil {
+				return err
+			}
 
-		ref := secretRef{Env: env, ItemID: itemID, Key: key}
-		return RecordAudit(ctx, tx, ref.auditEntry(ac, ActionSecretWrite, ResultSuccess, int(version)))
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO item_versions (item_id, version, value_enc, nonce, dek_version, created_at, created_by)
+				VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				itemID, version, ciphertext, nonce, dekVersion, ac.Now.Unix(), ac.Actor); err != nil {
+				return fmt.Errorf("insert item version: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE items SET current_version = ?, updated_at = ? WHERE id = ?`,
+				version, ac.Now.Unix(), itemID); err != nil {
+				return fmt.Errorf("update item: %w", err)
+			}
+
+			ref := secretRef{Env: env, ItemID: itemID, Key: key}
+			return RecordAudit(ctx, tx, ref.auditEntry(ac, ActionSecretWrite, ResultSuccess, int(version)))
+		})
 	})
 }
 
