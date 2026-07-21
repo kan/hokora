@@ -1,7 +1,6 @@
 # hokora
 
 [![CI](https://github.com/kan/hokora/actions/workflows/ci.yml/badge.svg)](https://github.com/kan/hokora/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/kan/hokora)](https://goreportcard.com/report/github.com/kan/hokora)
 [![Go Reference](https://pkg.go.dev/badge/github.com/kan/hokora/sdk.svg)](https://pkg.go.dev/github.com/kan/hokora/sdk)
 [![Release](https://img.shields.io/github/v/release/kan/hokora?sort=semver)](https://github.com/kan/hokora/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
