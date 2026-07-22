@@ -43,6 +43,16 @@ func dataSourceName(path string) string {
 	return "file:" + url.PathEscape(path) + "?" + q.Encode()
 }
 
+// dataSourceNameReadOnly は path を読み取り専用で開く DSN を組み立てる。
+//
+// **WAL の pragma を付けない。** dataSourceName は journal_mode(WAL) を適用
+// するが、それを読み取り専用で開きたい対象に適用すると、対象ファイルへ書き込みが
+// 走って -wal / -shm の随伴ファイルを生む。スナップショットを副作用なく点検する
+// 用途(バックアップの検証)では、mode=ro で開いて一切書き込ませない。
+func dataSourceNameReadOnly(path string) string {
+	return "file:" + url.PathEscape(path) + "?mode=ro"
+}
+
 // OpenStore は DB を開き、スキーマのバージョンが本バイナリと一致することを
 // 確認する。一致しない DB(未初期化を含む)はエラーにする。
 //
@@ -68,11 +78,46 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 	return store, nil
 }
 
+// OpenStoreReadOnly は DB を読み取り専用で開き、スキーマのバージョンが本バイナリと
+// 一致することを確認する。
+//
+// **対象ファイルを一切変更しない**(mode=ro。WAL の pragma を付けないので
+// -wal / -shm の随伴ファイルも作らない)。バックアップのスナップショットを副作用
+// なく点検する用途に使う。書き込み経路の OpenStore と別口だが、DSN の構築と
+// スキーマ検査をこの層へ集約し、コマンド側が生の sql.Open に手を伸ばさないようにする。
+func OpenStoreReadOnly(ctx context.Context, path string) (*Store, error) {
+	store, err := openDatabaseDSN(ctx, dataSourceNameReadOnly(path))
+	if err != nil {
+		return nil, err
+	}
+
+	version, err := schemaVersionOf(ctx, store.db)
+	if err != nil {
+		return nil, errors.Join(err, store.Close())
+	}
+	if version != schemaVersion {
+		// OpenStore と違い「run `hokora init`」は促さない。点検対象は稼働 DB では
+		// なくバックアップのスナップショットであり、そこへ init を促すのは誤誘導。
+		return nil, errors.Join(
+			fmt.Errorf("database schema version is %d, want %d", version, schemaVersion),
+			store.Close(),
+		)
+	}
+	return store, nil
+}
+
 // openDatabase は接続だけを確立し、スキーマのバージョンを検査しない。
 // スキーマ未適用の DB を扱ってよいのは init(Migrate)だけなので、直接呼ぶのは
 // init と OpenStore に限る。他の経路は必ず OpenStore を通す。
 func openDatabase(ctx context.Context, path string) (*Store, error) {
-	db, err := sql.Open("sqlite", dataSourceName(path))
+	return openDatabaseDSN(ctx, dataSourceName(path))
+}
+
+// openDatabaseDSN は与えられた DSN で接続を確立する(スキーマのバージョンは
+// 検査しない)。DSN の違い(読み書き / 読み取り専用)だけを呼び出し側に委ね、
+// プール設定と接続確認をここへ集約する。
+func openDatabaseDSN(ctx context.Context, dsn string) (*Store, error) {
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

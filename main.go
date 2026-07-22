@@ -24,6 +24,8 @@ Server commands:
   status          show the server status
   rotate-master --stdin
                   rotate the master key (current and new key are read from stdin)
+  backup --out <path>
+                  write an encrypted (ciphertext-only) backup; works online
 
 To fetch secrets from an application host, use the separate hokora-client
 binary (or import github.com/kan/hokora/sdk in Go apps).
@@ -58,6 +60,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdStatus(ctx, rest)
 	case "rotate-master":
 		return cmdRotateMaster(ctx, rest)
+	case "backup":
+		return cmdBackup(ctx, rest)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil

@@ -410,7 +410,7 @@ M4 は「Machine API・認証・ネットワーク境界」に集中する。
 | **DNS レコード(Q6)** | 公開 DNS の `hokora.example.com` は Machine API の public IP。Web UI 用に VPN 内 IP を指す別レコード。**内部 IP が公開 DNS に載る軽微な情報漏れを受容することを明記** |
 | **sudoers** | **`sudo -n` を前提とした NOPASSWD 設定**(DESIGN §10.1)。sudo が stdin から MK を消費するのを防ぐ |
 | unseal 手順 | **開発者でないメンバーでも実行できる粒度で** |
-| **バックアップ手順(Q5)** | **offline: seal → 停止 → 接続クローズ確認 → コピー → 起動 → unseal。`-wal` / `-shm` を含む全ファイルセットをコピーするか、停止後に WAL が消えていることを確認する** |
+| **バックアップ手順(Q5)** | **online: `hokora backup --out <path>`(`VACUUM INTO`。稼働中・sealed でも取れ、暗号文のみをコピー。単一ファイルなので `-wal` / `-shm` の取りこぼしが無い)。停止を伴う offline 手順(seal → 停止 → コピー → 起動 → unseal)はフォールバックとして残す** |
 | **復元テスト手順** | **R3 の緩和策が実態を持つために必須** |
 | **復元時の注意(R16)** | **古いバックアップを復元すると、古い credential・削除済み grant・変更前のパスワード・古いセッションが復活する。復元後に全セッションを削除し、バックアップ取得後の credential / grant / user 変更を再適用する** |
 | MK 紛失時の対応 | 復旧不能であることの明示 |
@@ -472,7 +472,7 @@ M4 は「Machine API・認証・ネットワーク境界」に集中する。
 | 項目 | 動機 |
 |------|------|
 | **SDK の `WithMlockall()` Option** | **アプリサーバー側の swap 経由の漏洩を減らす(THREAT_MODEL §5.4)。デフォルト無効。`LimitMEMLOCK=infinity` が必要。プロセス全メモリが常駐することを godoc に明記。`golang.org/x/sys` の依存追加を伴う。効くのは swap のみで、core dump / kdump は運用で止める必要があることも明記** |
-| SQLite の `VACUUM INTO` によるオンラインバックアップ | M6 の offline 手順を置き換える |
+| ~~SQLite の `VACUUM INTO` によるオンラインバックアップ~~ | **M6 へ前倒し実装済み**（`hokora backup`）。offline 手順はフォールバックとして残置 |
 | mTLS によるクライアント認証 | 多層防御。**N2 は解決しない** |
 | Ansible role による deploy | 既存の運用に合わせる |
 | Prometheus メトリクス | 監視の統合 |
