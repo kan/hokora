@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-22
+
+### Added
+
+- **`hokora backup`**: online, ciphertext-only backups via SQLite `VACUUM INTO`.
+  It runs while the server is live and even while sealed (it never touches the
+  vault, DEK, or master key), so it needs no stop/unseal and writes a single
+  self-contained file (no `-wal` / `-shm` to miss). The destination is created
+  `0600` before the copy so the ciphertext is never briefly world-readable, is
+  re-opened read-only to check its schema version, and refuses to overwrite an
+  existing file. This is the online replacement for the offline stop-and-copy
+  procedure and the primary way to seed a cold standby; see
+  [docs/OPERATIONS.md](docs/OPERATIONS.md) §9. Backups are deliberately not
+  audit-logged (the operation cannot run inside a transaction, and any principal
+  who can run it can already copy the ciphertext database directly).
+
 ## [0.1.0] - 2026-07-21
 
 Initial release. A minimal secret-management server for a single organization
@@ -44,5 +60,6 @@ what it does not.
   rotation, and incident response.
 - **Release tooling**: reproducible Linux amd64/arm64 builds via GoReleaser.
 
-[Unreleased]: https://github.com/kan/hokora/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kan/hokora/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kan/hokora/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kan/hokora/releases/tag/v0.1.0
