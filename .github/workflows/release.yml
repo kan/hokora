@@ -22,6 +22,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # tools/go.sum (開発ツール) の変更もキャッシュキーに反映させる。
+          cache-dependency-path: "**/go.sum"
       # 「設定した」ではなく「効いている」を確かめる。setup-go は go.mod の
       # `toolchain` 行を優先して入れる。リリース成果物が宣言どおりの処理系で
       # ビルドされることを固定する。

@@ -359,18 +359,29 @@ toolchain go1.26.5
 
 **SDK(`sdk/`)は標準ライブラリのみ**(Phase 2 の `WithMlockall()` を除く)。
 
-### ツール依存(`go.mod` の `tool` ディレクティブ)
+### ツール依存(`tools/go.mod` の `tool` ディレクティブ)
 
 上記の禁止は **バイナリにリンクされる依存** の話である。開発ツールは
-`tool` ディレクティブで宣言し、バージョンを `go.mod` で固定する:
+`tool` ディレクティブで宣言し、バージョンを **`tools/go.mod`** で固定する:
 
 - `github.com/golangci/golangci-lint/v2/cmd/golangci-lint`
 - `golang.org/x/vuln/cmd/govulncheck`
 
-これらは `go build` の成果物には入らない。`go.mod` / `go.sum` に大量の
-indirect が並ぶのはこのためであり、**本体の依存が増えたわけではない**。
-成果物に入る依存かどうかは `go list -deps .` で確認できる。
+これらは `go build` の成果物には入らない。**しかし root の `go.mod` に置くと、
+ツールの indirect(200 module 超)が root の go.mod に列挙され、SDK しか
+import していない利用側の module graph にまで伝播する**(実測: 利用側の
+`go list -m all` が 225 → 分離後 15)。成果物に入らないことと、利用側に
+見えないことは別である。そのため `tools/` の別 module に分離してある。
 
+`make lint` / `make vuln` は tools module からバイナリを `bin/` にビルドし、
+**repo root で実行する**(`go tool -C tools` では `./...` が tools 側に
+解決され、本体をスキャンしない)。
+
+**go.mod が 2 つある以上、片方だけ宣言が古くなる経路ができる。**
+`make toolchain-check` が `tools/go.mod` の `go` / `toolchain` 行を root と
+突き合わせる(`Makefile` の `SUBMODULES`)。go.mod を増やしたらここに足す。
+
+成果物に入る依存かどうかは `go list -deps .` で確認できる。
 ツール依存を足すときも、**用途を説明できるものに限る**。
 
 ---
@@ -396,6 +407,7 @@ hokora/
 ├── static/              # style.css, bfcache.js
 ├── cmd/hokora-client/   # クライアント専用バイナリ(get / run)。標準ライブラリ + sdk のみ
 ├── sdk/                 # 外部から import される Go SDK
+├── tools/               # 開発ツール専用の別 module(golangci-lint / govulncheck)
 └── docs/
 ```
 

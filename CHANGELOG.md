@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `make toolchain-check` (wired into `make all` and CI) fails when the running
   toolchain differs from the declared one, so `GOTOOLCHAIN=local` with an older
   1.26.x cannot silently satisfy the relaxed `go` line.
+- **Development tools moved to a separate `tools/` module.** `golangci-lint` and
+  `govulncheck` are not linked into any binary, but declaring them with `tool`
+  directives in the root `go.mod` listed 200+ indirect requirements there, and
+  those propagated into the module graph of anything importing the SDK. A
+  consumer that imports only `github.com/kan/hokora/sdk` now sees 15 modules
+  instead of 225. Nothing about the released binaries changes.
 
 ## [0.2.0] - 2026-07-22
 

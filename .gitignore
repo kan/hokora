@@ -3,6 +3,9 @@
 /hokora-client
 /dist/
 
+# 開発ツールのバイナリ(tools/ の別 module からビルドする。issue #3)
+/bin/
+
 # ローカルの作業用ディレクトリ(Pike の TODO 等。公開リポジトリに含めない)
 /.pike/
 
