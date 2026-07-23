@@ -311,7 +311,7 @@
 
 | 項目 | 選択 | 備考 |
 |------|------|------|
-| 言語 | Go 1.26.5+ | `go.mod` が正。**最低バージョンは「既知の到達可能な脆弱性が無い最新の安定版」に合わせる。** CI は `go-version-file: go.mod` でこの版を入れるため、宣言が古いと CI は古い(脆弱な)処理系で走り続ける |
+| 言語 | Go(`go 1.26` + `toolchain go1.26.5`) | `go.mod` が正。**2 つの行を別の目的で使い分ける**(下記) |
 | DB | SQLite | `modernc.org/sqlite`(CGO 不要) |
 | DB アクセス | `database/sql` + 素の SQL | **ORM を使わない** |
 | HTTP | `net/http` + `http.ServeMux` | **Web フレームワークを使わない** |
@@ -319,6 +319,36 @@
 | 暗号 | 標準ライブラリ + `golang.org/x/crypto` | |
 | syscall | `golang.org/x/sys/unix` | **mlockall のみ**(DESIGN §4.2) |
 | アセット同梱 | `embed` | |
+
+### `go` ディレクティブと `toolchain` を分けて宣言する
+
+```
+go 1.26
+
+toolchain go1.26.5
+```
+
+- **`go` 行は「利用側に要求する最低言語バージョン」**。Go 1.21 以降、依存
+  module の `go` 行は利用側への強制であり、**patch まで書くと
+  (`go 1.26.5`)、`go 1.26` と宣言している利用側の go.mod が
+  `go mod tidy` で `go 1.26.5` に書き換えられ、その先の利用者へ伝播する。**
+  SDK を配る module で patch を宣言しない
+- **`toolchain` 行は「hokora 自身がビルド・検査に使う処理系」**。
+  依存 module の `toolchain` は無視される(効くのは main module のみ)ため、
+  **利用側のコストはゼロ**。hokora 側は `GOTOOLCHAIN=auto`(既定)で
+  1.26.5 に切り替わり、`GOTOOLCHAIN=local` かつ古い処理系なら
+  go コマンドがエラーになる(fail closed)
+- **`toolchain` 行を省いてはならない。** `go 1.26` だけにすると、手元に
+  go1.26.0 がある開発者は宣言を満たすため自動アップグレードが起きず、
+  既知の脆弱性を持つ処理系でビルド・スキャンし続ける。上の教訓表
+  (「宣言が古いと CI は脆弱な処理系で走り続ける」)が裏返しで再発する
+- `toolchain` があれば **CI(`go-version-file: go.mod`)もその版を入れる**
+  (actions/setup-go は toolchain があればそれを優先する)。
+  「宣言した版でスキャンされる」性質が保たれ、`vuln.yml` の定期
+  govulncheck が **宣言の陳腐化そのもの**を検出できる
+- 外部スキャナ(OSV-Scanner 等)は `toolchain` を見ずに `go` 行を stdlib
+  版として扱う不具合があり誤警告しうるが、**`go` 行はスキャナの都合ではなく
+  「利用側に要求する最低言語バージョン」として決める**
 
 **依存の追加は原則禁止。**
 

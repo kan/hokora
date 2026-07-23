@@ -39,5 +39,11 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      # 「設定した」ではなく「効いている」を確かめる。setup-go は go.mod の
+      # `toolchain` 行を優先して入れる。**stdlib の脆弱性判定はスキャンに使った
+      # 処理系の版で決まる**ため、ここでの一致確認は特に重要である。
+      - name: toolchain
+        run: make toolchain-check
+
       - name: govulncheck
         run: make vuln

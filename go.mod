@@ -1,6 +1,8 @@
 module github.com/kan/hokora
 
-go 1.26.5
+go 1.26
+
+toolchain go1.26.5
 
 require (
 	golang.org/x/crypto v0.54.0

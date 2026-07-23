@@ -22,6 +22,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # 「設定した」ではなく「効いている」を確かめる。setup-go は go.mod の
+      # `toolchain` 行を優先して入れるが、それを検査で固定しておく。
+      - name: toolchain
+        run: make toolchain-check
+
       - name: gofmt
         run: make fmt-check
 
@@ -43,5 +48,10 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      # 「設定した」ではなく「効いている」を確かめる。setup-go は go.mod の
+      # `toolchain` 行を優先して入れるが、それを検査で固定しておく。
+      - name: toolchain
+        run: make toolchain-check
+
       - name: golangci-lint
         run: make lint

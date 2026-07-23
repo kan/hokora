@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`go.mod` now declares `go 1.26` with a separate `toolchain go1.26.5`.**
+  Since Go 1.21 a dependency's `go` directive is a *minimum* imposed on the
+  consumer, so declaring a patch version (`go 1.26.5`) made `go mod tidy`
+  rewrite a consumer's own `go 1.26` line to `go 1.26.5`, which then propagated
+  further downstream. Importing `github.com/kan/hokora/sdk` no longer does that.
+  A dependency's `toolchain` directive is ignored downstream, so hokora itself
+  still builds and is scanned with go1.26.5 at no cost to consumers. A new
+  `make toolchain-check` (wired into `make all` and CI) fails when the running
+  toolchain differs from the declared one, so `GOTOOLCHAIN=local` with an older
+  1.26.x cannot silently satisfy the relaxed `go` line.
+
 ## [0.2.0] - 2026-07-22
 
 ### Added

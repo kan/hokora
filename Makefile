@@ -3,9 +3,27 @@ BIN        ?= hokora
 CLIENT_BIN ?= hokora-client
 TIMEOUT    ?= 120s
 
-.PHONY: all build build-client test vet fmt fmt-check lint vuln tidy clean
+.PHONY: all build build-client test vet fmt fmt-check lint vuln tidy clean \
+        toolchain-check
 
-all: fmt-check vet lint test build
+all: toolchain-check fmt-check vet lint test build
+
+# go.mod の `toolchain` 行と、実際に走っている処理系の版が一致することを
+# 確かめる。`go` 行は利用側への最低要求(1.26)であって patch を含まないため、
+# **GOTOOLCHAIN=local かつ go1.26.0 の環境では宣言を満たしてしまい、既知の
+# 脆弱性を持つ処理系でビルド・スキャンが通ってしまう。** 宣言(設定した)と
+# 実行(効いている)を突き合わせてそこを塞ぐ。CI も同じターゲットを呼ぶ。
+toolchain-check:
+	@want="$$(sed -n 's/^toolchain go//p' go.mod)"; \
+	got="$$($(GO) version | awk '{print $$3}' | sed 's/^go//')"; \
+	echo "go.mod toolchain=$$want  running=$$got"; \
+	if [ -z "$$want" ]; then \
+		echo "go.mod に toolchain 行がない (AGENTS.md 技術スタック節を参照)"; exit 1; \
+	fi; \
+	if [ "$$want" != "$$got" ]; then \
+		echo "toolchain mismatch: go.mod は go$$want を宣言しているが go$$got で走っている"; \
+		echo "GOTOOLCHAIN=auto (既定) で実行するか、go$$want を入れること"; exit 1; \
+	fi
 
 # サーバー本体(hokora)とクライアント専用バイナリ(hokora-client)の両方を
 # ビルドする。クライアントは標準ライブラリ + sdk のみに依存し、サーバーの
