@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-23
+
 ### Changed
 
 - **`go.mod` now declares `go 1.26` with a separate `toolchain go1.26.5`.**
@@ -31,8 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `govulncheck` are not linked into any binary, but declaring them with `tool`
   directives in the root `go.mod` listed 200+ indirect requirements there, and
   those propagated into the module graph of anything importing the SDK. A
-  consumer that imports only `github.com/kan/hokora/sdk` now sees 15 modules
-  instead of 225. Nothing about the released binaries changes.
+  consumer that imports only `github.com/kan/hokora/sdk` went from 225 modules
+  to 15 with this change alone, and to 1 once the SDK became its own module
+  (above). Nothing about the released binaries changes.
 
 ## [0.2.0] - 2026-07-22
 
@@ -87,6 +90,7 @@ what it does not.
   rotation, and incident response.
 - **Release tooling**: reproducible Linux amd64/arm64 builds via GoReleaser.
 
-[Unreleased]: https://github.com/kan/hokora/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/kan/hokora/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kan/hokora/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kan/hokora/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kan/hokora/releases/tag/v0.1.0

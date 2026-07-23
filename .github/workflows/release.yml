@@ -30,6 +30,27 @@ jobs:
       - name: toolchain
         run: make toolchain-check
 
+      # sdk は別 module であり、`go get github.com/kan/hokora/sdk` は
+      # **`sdk/vX.Y.Z` タグでしか解決されない。** さらに、root module のタグを
+      # 打つと nested module である sdk/ はその module から除外されるため、
+      # **sdk タグを打たずにサーバーだけリリースすると利用側の go get が壊れる。**
+      # 打ち忘れを沈黙させないよう、リリース前に同番号・同コミットを検査する。
+      - name: sdk タグの検査
+        run: |
+          v="${GITHUB_REF_NAME}"
+          if ! git rev-parse -q --verify "refs/tags/sdk/$v^{commit}" >/dev/null; then
+            echo "::error::sdk/$v タグが無い。sdk/$v を先に打ってから $v を打つこと"
+            echo "(AGENTS.md「リリースはタグが 2 系統になる」を参照)"
+            exit 1
+          fi
+          sdk_commit="$(git rev-parse "refs/tags/sdk/$v^{commit}")"
+          srv_commit="$(git rev-parse "refs/tags/$v^{commit}")"
+          echo "sdk/$v=$sdk_commit  $v=$srv_commit"
+          if [ "$sdk_commit" != "$srv_commit" ]; then
+            echo "::error::sdk/$v と $v が別コミットを指している"
+            exit 1
+          fi
+
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           version: '~> v2'
