@@ -9,6 +9,12 @@ cache.
 go get github.com/kan/hokora/sdk
 ```
 
+It is a **separate module from the server**, so importing it adds exactly one
+module to your build list and nothing else: it has no dependencies outside the
+standard library, and it does not drag in the server's SQLite driver or its Go
+version requirement. Minimum Go: **1.24**. Both properties are enforced by
+tests (`deps_test.go`), not just documented.
+
 **Full API reference:**
 [pkg.go.dev/github.com/kan/hokora/sdk](https://pkg.go.dev/github.com/kan/hokora/sdk)
 

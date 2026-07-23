@@ -6,19 +6,9 @@ import (
 	"testing"
 )
 
-// **SDK は標準ライブラリのみに依存する**(AGENTS.md)。
-//
-// SDK を import するアプリに、サーバー本体の依存(modernc.org/sqlite 等)を
-// 引き込ませないための不変条件である。`go list -deps ./sdk` を走らせ、
-// 標準ライブラリと SDK 自身以外のパッケージが無いことを確かめる。
-//
-// 判定: サードパーティのパッケージはインポートパスの **先頭要素にドメイン
-// (ドット)を持つ**(github.com/... 等)。標準ライブラリは持たない
-// (net/http、crypto/internal/... 等)。SDK 自身だけは例外として許す。
-func TestSDKDependsOnlyOnTheStandardLibrary(t *testing.T) {
-	t.Parallel()
-	assertStdlibOnly(t, "./sdk", "the sdk", "github.com/kan/hokora/sdk")
-}
+// SDK 自身の依存検査は sdk/deps_test.go にある(別 module のため、root から
+// `go list -deps ./sdk` は解決できない)。パッケージ依存に加えて **module
+// graph が自分 1 つだけ**であることも、あちらで固定している。
 
 // **クライアント専用バイナリ(cmd/hokora-client)は標準ライブラリ + sdk のみ**
 // に依存する(AGENTS.md)。アプリホストに配るバイナリに、サーバー本体の依存

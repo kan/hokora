@@ -6,6 +6,15 @@
 # 開発ツールのバイナリ(tools/ の別 module からビルドする。issue #3)
 /bin/
 
+# **go.work をコミットしない。** workspace が有効だと go コマンドは
+# 全 module の require を MVS でまとめた build list でビルドするため、
+# tools の依存版がサーバーのビルドに混ざりうる(リリース成果物が go.mod の
+# 宣言と別の版で作られる)。`go list -m all` も workspace 全体を返し、
+# 利用側が見る module graph と別物になる。root の go.mod の
+# `replace ... => ./sdk` で足りる。
+/go.work
+/go.work.sum
+
 # ローカルの作業用ディレクトリ(Pike の TODO 等。公開リポジトリに含めない)
 /.pike/
 

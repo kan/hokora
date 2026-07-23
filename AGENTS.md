@@ -89,6 +89,9 @@
 | トークン改竄のテストが `strings.Replace(valid, valid[:1], "A", 1)` で先頭を "A" にしていたが、**先頭がたまたま "A" だと無置換になり有効なトークンのまま**残る。乱数由来の値なので約 1/64 で「改竄したはずが有効」になり、`make all` は当日通るのにマージ後の CI が別の値を引いて落ちた | **乱数由来のテストデータに改竄操作をかけるときは、その操作が no-op になりうるかを見る。** `-race` や `make all` を 1 回通しても確率的フレークは出ない。改竄は「必ず別の値になる」形(生バイトの `flipByte` 等)で作り、`-count=N` で確かめる |
 | ルール 67 で「Vault.mu → tokenStore.mu」の順序は固定したが、**第 3 のロック(SQLite の書き込みロック)の順序は未規定だった。** `PutSecret`(新規 key)が「DB 書込ロック → Vault.RLock」、revoke 系が「Vault.WLock → DB 書込」で逆順になり、緊急遮断が SQLITE_BUSY で失敗しうる状態が C6/C8 を塞いだ後も残っていた(Fable 5 レビューで発見) | **順序を固定するロックの一覧に、DB トランザクションのような『暗黙のロック』を数え漏らさない。** mutex 同士だけ見て「順序は固定した」と言わない。DB tx を開いている間に別のロックを取る箇所を洗う |
 | **サーバーに単一取得 `/v1/secrets/{key}` があるのに、SDK に単一取得メソッドが無く、`hokora-client get KEY` が bulk `Fetch()` で grant 内の全 key を read・監査していた**(Fable 5 レビューで発見)。端末確認 1 回ごとに全 key が「漏洩したかもしれない」監査記録(§10.5)になり、インシデント切り分けを汚す | **エンドポイントとクライアントの粒度を揃える。** サーバーが単一取得を用意しているのにクライアントが全件取得すると、監査精度(V4)が壊れる。監査に関わる操作は「何を read したか」がログと一致するようにする |
+| `tool` ディレクティブは成果物に入らないので「本体の依存は増えていない」と書いていたが、**その indirect は root の go.mod に列挙されるため、SDK しか import していない利用側の module graph には 225 件として伝播していた** | **「成果物に入らない」と「利用側から見えない」は別である。** 依存の影響範囲は、リンクされるかどうかだけでなく **利用側が何を解決させられるか** で測る |
+| SDK の依存を `go list -deps`(パッケージ単位)だけで検査していた。**module graph は誰も見ていなかった**ため、上の 225 件は不変条件をすり抜けていた。冒頭の「部品の単体テストは配線を検証しない」と同型 | **測る単位が対象と揃っているか確かめる。** 利用側が受け取るのは module であって、パッケージ依存グラフではない |
+| 別 module 化の作業中、gopls の警告を消すため `go.work` を置いたら、**`go list -m all` が workspace 全体を返し、追加したばかりの module graph テストが誤った対象を測って落ちた。** ビルドも全 module の require を MVS でまとめた build list を使う | **開発の便宜で入れた設定が、検査と成果物の意味を変えることがある。** 「エディタのため」に入れるものでも、go コマンドの解決規則を変えるなら影響を追う |
 | 外部レビュー(Codex)の「`ListEnvironments` が親 project の `deleted_at` を再検査していない(ルール 58)」という指摘どおりに直したら、**既存テストが逆の挙動(祖先検査は解決側の責務、行は残す)を意図として固定していた**ため落ちた | **外部レビューの指摘も鵜呑みにしない。** 直す前に、既存テストやコメントが逆を主張していないか見る。主張していたらまずその設計意図を確認し、指摘が既存の意図と衝突するなら「偽陽性」として扱う |
 
 **この表は増える前提で書かれている。** 同種の誤りを見つけたら追記すること。
@@ -406,7 +409,7 @@ hokora/
 ├── templates/           # embed
 ├── static/              # style.css, bfcache.js
 ├── cmd/hokora-client/   # クライアント専用バイナリ(get / run)。標準ライブラリ + sdk のみ
-├── sdk/                 # 外部から import される Go SDK
+├── sdk/                 # 外部から import される Go SDK。**別 module**(依存ゼロ)
 ├── tools/               # 開発ツール専用の別 module(golangci-lint / govulncheck)
 └── docs/
 ```
@@ -422,6 +425,45 @@ hokora/
 (T1-a に対する新しい防御ではない。`sdk_deps_test.go` が「標準ライブラリ +
 sdk のみ」を不変条件として検査する)。**`cmd/<name>/` を増やすときも
 `package main` に限り、サーバーロジックはあくまで root に置く。**
+
+### module は 3 つある
+
+| module | 目的 | go 行(利用側への最低要求) |
+|---|---|---|
+| root(`github.com/kan/hokora`) | サーバー本体・クライアントバイナリ | 1.26 |
+| `sdk/` | アプリに配る Go SDK。**依存ゼロ** | **1.24**(低く保つ) |
+| `tools/` | 開発ツール(lint / vuln)。成果物に入らない | 1.26 |
+
+**分離の理由は、利用側の module graph と go 行の強制を切り離すことにある。**
+単一 module だと、SDK しか import していないアプリにも
+modernc.org/sqlite やツールの indirect が伝播し(実測 225 module)、
+`go` 行もサーバーの都合で引き上げられる。分離後、SDK だけを使う利用側の
+`go list -m all` は **1 件**である(`sdk/deps_test.go` が固定)。
+
+- **root は常にツリー内の sdk をビルドする**(`replace ... => ./sdk`)。
+  require の版と実際にビルドされる版がずれる経路を作らないための恒久措置で、
+  代償として **`go install github.com/kan/hokora@version` は使えない**
+  (インストールは Releases のバイナリか clone + `make build`)
+- **`go.work` をコミットしない**(`.gitignore` 済み)。workspace が有効だと
+  go コマンドは全 module の require を MVS でまとめた build list を使うため、
+  **tools の依存版がサーバーのビルドに混ざり、`go list -m all` も利用側が
+  見るものと別物になる。** module graph を測るテストは `GOWORK=off` を明示する
+- **`make` は module ごとに回す**(`MODULES` / `SUBMODULES`)。root の
+  `./...` に sdk は入らないので、**test / vet / lint を root だけで回すと
+  sdk が素通しになる**
+- sdk の `go` 行を上げない。SDK 本体は go1.21 でもビルドでき、1.24 という
+  下限はテストの `t.Context` に由来する。**上げるときは「利用側に要求してよいか」
+  で判断する**(`make toolchain-check` が root を超える宣言を弾く)
+
+### リリースはタグが 2 系統になる
+
+sdk が別 module なので、`go get github.com/kan/hokora/sdk` は **`sdk/vX.Y.Z`
+タグ**で解決される。サーバーの `vX.Y.Z` タグとは別物である。
+
+- SDK に利用者向けの変更を入れたら、`sdk/vX.Y.Z` タグも打つ。
+  **打たない限り、利用側には一切届かない**
+- root は replace でツリー内の sdk を使うため、root の go.mod を
+  sdk のタグに合わせて更新する必要はない
 
 ---
 

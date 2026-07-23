@@ -4,10 +4,15 @@ CLIENT_BIN ?= hokora-client
 TIMEOUT    ?= 120s
 BINDIR     ?= bin
 
-# root 以外の go.mod。go / toolchain の宣言が root からずれていないかを
+# root 以外の go.mod。toolchain の宣言が root からずれていないかを
 # toolchain-check が検査する(**2 つ目の go.mod ができた時点で、片方だけ
-# 古くなる経路ができる**)。
-SUBMODULES := tools/go.mod
+# 古くなる経路ができる**)。go 行は利用側への最低要求なので、sdk のように
+# 意図的に低く宣言してよい(root より高いのは許さない)。
+SUBMODULES := tools/go.mod sdk/go.mod
+
+# パッケージを持つ module。sdk は別 module なので、root の ./... には
+# 入らない。**test / vet / lint を root だけで回すと sdk が素通しになる。**
+MODULES := . sdk
 
 .PHONY: all build build-client test vet fmt fmt-check lint vuln tidy clean \
         toolchain-check
@@ -33,9 +38,13 @@ toolchain-check:
 	rootgo="$$(sed -n 's/^go //p' go.mod)"; \
 	for f in $(SUBMODULES); do \
 		g="$$(sed -n 's/^go //p' $$f)"; t="$$(sed -n 's/^toolchain go//p' $$f)"; \
-		if [ "$$g" != "$$rootgo" ] || [ "$$t" != "$$want" ]; then \
-			echo "$$f の宣言が go.mod とずれている (go $$g / toolchain $$t)"; \
-			echo "root は go $$rootgo / toolchain go$$want である"; exit 1; \
+		if [ "$$t" != "$$want" ]; then \
+			echo "$$f の toolchain が go.mod とずれている (go$$t / root は go$$want)"; \
+			exit 1; \
+		fi; \
+		if [ "$$(printf '%s\n%s\n' "$$g" "$$rootgo" | sort -V | head -1)" != "$$g" ]; then \
+			echo "$$f の go 行 ($$g) が root ($$rootgo) より新しい"; \
+			echo "go 行は利用側への最低要求である。root を超えて上げない"; exit 1; \
 		fi; \
 	done
 
@@ -51,10 +60,13 @@ build-client:
 # 並行制御のバグは race detector なしでは見えない。既定で -race を付ける。
 # 暴走したテストで環境ごと固まらないよう -timeout を必ず指定する。
 test:
-	$(GO) test -race -timeout $(TIMEOUT) ./...
+	@for m in $(MODULES); do \
+		echo "==> go test ($$m)"; \
+		$(GO) test -C $$m -race -timeout $(TIMEOUT) ./... || exit 1; \
+	done
 
 vet:
-	$(GO) vet ./...
+	@for m in $(MODULES); do $(GO) vet -C $$m ./... || exit 1; done
 
 fmt:
 	gofmt -w .
@@ -81,13 +93,16 @@ $(BINDIR)/govulncheck: tools/go.mod tools/go.sum
 		golang.org/x/vuln/cmd/govulncheck
 
 lint: $(BINDIR)/golangci-lint
-	$(BINDIR)/golangci-lint run
+	@for m in $(MODULES); do \
+		echo "==> golangci-lint ($$m)"; \
+		(cd $$m && $(abspath $(BINDIR))/golangci-lint run) || exit 1; \
+	done
 
 vuln: $(BINDIR)/govulncheck
 	$(BINDIR)/govulncheck ./...
 
 tidy:
-	$(GO) mod tidy
+	@for m in $(MODULES) tools; do $(GO) mod tidy -C $$m || exit 1; done
 
 clean:
 	rm -f $(BIN) $(CLIENT_BIN)

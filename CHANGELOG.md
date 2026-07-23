@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `make toolchain-check` (wired into `make all` and CI) fails when the running
   toolchain differs from the declared one, so `GOTOOLCHAIN=local` with an older
   1.26.x cannot silently satisfy the relaxed `go` line.
+- **The SDK is now its own module (`github.com/kan/hokora/sdk`).** Importing it
+  used to make the application resolve the server's dependencies (SQLite driver
+  and friends) and accept the server's Go requirement. It now contributes
+  exactly one module to a consumer's build list and requires only **Go 1.24**.
+  `go get github.com/kan/hokora/sdk` is unchanged, but SDK releases are tagged
+  `sdk/vX.Y.Z`. The server module builds the SDK from the tree
+  (`replace ... => ./sdk`), so `go install github.com/kan/hokora@version` is no
+  longer supported; install from Releases or `git clone` + `make build`.
 - **Development tools moved to a separate `tools/` module.** `golangci-lint` and
   `govulncheck` are not linked into any binary, but declaring them with `tool`
   directives in the root `go.mod` listed 200+ indirect requirements there, and

@@ -151,11 +151,17 @@ cd hokora
 make build          # produces ./hokora and ./hokora-client
 ```
 
-The Go SDK for applications:
+The Go SDK for applications (its own module: **no dependencies, and it does not
+impose the server's Go version — it needs only Go 1.24+**):
 
 ```
 go get github.com/kan/hokora/sdk
 ```
+
+Note that `go install github.com/kan/hokora@version` is deliberately not
+supported: the server module always builds the SDK from the tree
+(`replace ... => ./sdk`) so that a release can never be built against a
+different SDK version than the one in the repository.
 
 ---
 
