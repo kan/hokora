@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"html/template"
 	"io/fs"
 	"log/slog"
@@ -96,6 +97,7 @@ func (u *uiServer) uiMux() *http.ServeMux {
 
 	mux.HandleFunc("GET /ui/projects/{slug}/{env}", u.authed(needUnsealed, u.handleEnvironment))
 	mux.HandleFunc("POST /ui/projects/{slug}/{env}/delete", u.authed(needUnsealed, u.handleDeleteEnvironment))
+	mux.HandleFunc("POST /ui/projects/{slug}/{env}/machines", u.authed(needUnsealed, u.handleCreateMachineForEnv))
 	mux.HandleFunc("POST /ui/projects/{slug}/{env}/items", u.authed(needUnsealed, u.handlePutItem))
 	mux.HandleFunc("POST /ui/projects/{slug}/{env}/items/{key}", u.authed(needUnsealed, u.handlePutItem))
 	mux.HandleFunc("POST /ui/projects/{slug}/{env}/items/{key}/reveal", u.authed(needUnsealed, u.handleReveal))
@@ -516,7 +518,12 @@ func (u *uiServer) handleEnvironment(w http.ResponseWriter, r *http.Request, req
 	if !ok {
 		return
 	}
+	u.renderEnvironment(w, r, req, env, nil)
+}
 
+// renderEnvironment は environment のページを描く。credential が非 nil なら、
+// この環境向けに作成したサーバーの credential を**一度だけ**表示する(#9)。
+func (u *uiServer) renderEnvironment(w http.ResponseWriter, r *http.Request, req uiRequest, env *EnvironmentRef, credential *machineCredential) {
 	// **一覧は平文を返さない**(AGENTS.md ルール 41)。ItemRow に値が無い。
 	items, err := ListItems(r.Context(), u.vault.db, env.EnvironmentID)
 	if err != nil {
@@ -527,7 +534,38 @@ func (u *uiServer) handleEnvironment(w http.ResponseWriter, r *http.Request, req
 	data := u.page(req, env.ProjectSlug+"/"+env.EnvSlug)
 	data.Env = env
 	data.Items = items
+	data.Credential = credential
+	if credential != nil {
+		// **credential も平文である**(AGENTS.md ルール 50)。作成導線でも
+		// reveal / machines と同等に、GET な安全 URL へ退避する。
+		data.BFCache = "replace"
+		data.BFCacheURL = envPath(env)
+	}
 	u.render(w, r, "environment.html", data)
+}
+
+// handleCreateMachineForEnv は environment 画面から、この環境へのアクセス権を
+// 持つサーバーを作成する(#9)。作成とアクセス権付与は 1 トランザクション。
+func (u *uiServer) handleCreateMachineForEnv(w http.ResponseWriter, r *http.Request, req uiRequest) {
+	env, ok := u.resolveEnv(w, r)
+	if !ok {
+		return
+	}
+
+	// **client_id はサーバーが生成する**(handleCreateMachine と同じ。ルール8)。
+	clientID, err := GenerateClientID()
+	if err != nil {
+		u.internalError(w, r, "generate client id", err)
+		return
+	}
+
+	_, secret, err := CreateMachineWithGrant(r.Context(), u.vault.db, clientID, r.PostFormValue("name"), env.EnvironmentID, req.auditCtx())
+	if err != nil {
+		u.badRequest(w, r, "サーバーを作成できませんでした", err)
+		return
+	}
+	// **client_secret はここでしか表示されない**(machines と同じ。ルール50)。
+	u.renderEnvironment(w, r, req, env, &machineCredential{ClientID: clientID, ClientSecret: secret})
 }
 
 func (u *uiServer) handleDeleteEnvironment(w http.ResponseWriter, r *http.Request, req uiRequest) {
@@ -670,7 +708,7 @@ func (u *uiServer) renderMachines(w http.ResponseWriter, r *http.Request, req ui
 		return
 	}
 
-	data := u.page(req, "アプリ")
+	data := u.page(req, "サーバー")
 	data.Machines = machines
 	data.Grantable = grantable
 	data.Credential = credential
@@ -700,11 +738,12 @@ func (u *uiServer) handleCreateMachine(w http.ResponseWriter, r *http.Request, r
 
 	_, secret, err := CreateMachine(r.Context(), u.vault.db, clientID, r.PostFormValue("name"), req.auditCtx())
 	if err != nil {
-		u.badRequest(w, r, "アプリを作成できませんでした", err)
+		u.badRequest(w, r, "サーバーを作成できませんでした", err)
 		return
 	}
 	// **client_secret はここでしか表示されない。** 保存されるのは
-	// SHA-256 のハッシュだけである。client_id は一覧でも常時表示される。
+	// SHA-256 のハッシュだけである。client_id は作成時にのみ表示し、
+	// 一覧には出さない(#7)。
 	u.renderMachines(w, r, req, &machineCredential{ClientID: clientID, ClientSecret: secret})
 }
 
@@ -945,6 +984,12 @@ func userFacingReason(err error) string {
 	case errors.Is(err, errSecretValueTooLarge), errors.Is(err, errSecretValueNotUTF8),
 		errors.Is(err, errSecretValueHasNUL):
 		return err.Error()
+	case errors.Is(err, errMachineNameEmpty):
+		return "名前を入力してください"
+	case errors.Is(err, errMachineNameTooLong):
+		return fmt.Sprintf("名前は %d バイト以内で入力してください", MaxMachineNameBytes)
+	case errors.Is(err, errMachineNameControl):
+		return "名前に使えない文字が含まれています"
 	default:
 		return ""
 	}

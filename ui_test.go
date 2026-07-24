@@ -539,6 +539,112 @@ func TestUIMachineCredentialIsShownOnce(t *testing.T) {
 	assertBFCacheReplace(t, w.Body.String(), "/ui/machines")
 }
 
+// **environment 画面からサーバーを作ると、その環境への grant 付きで作られ、
+// credential を一度だけ表示する**(#9)。
+//
+// credential も平文なので、平文ページと同じく data-bfcache="replace" で退避する
+// (ルール 50)。
+func TestUICreateMachineForEnv(t *testing.T) {
+	t.Parallel()
+
+	f := newUIFixture(t)
+	f.unseal(t)
+	env := f.seedSecret(t, "DATABASE_URL", testSecretValue)
+
+	w := f.post(t, envPath(env)+"/machines", url.Values{"name": {"請求バッチ"}})
+	if w.Code != http.StatusOK {
+		t.Fatalf("create machine for env = %d (body %q)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	// **credential を一度だけ表示する。**
+	if !strings.Contains(body, `class="credential"`) || !strings.Contains(body, "HOKORA_CLIENT_SECRET") {
+		t.Fatal("the credential was not shown")
+	}
+	// **平文ページなので replace(退避先は environment ページ)。**
+	assertBFCacheReplace(t, body, envPath(env))
+
+	// **作られた machine はこの環境への grant を持つ。**
+	var machineID int64
+	if err := f.store.DB().QueryRowContext(t.Context(),
+		`SELECT id FROM machines`).Scan(&machineID); err != nil {
+		t.Fatalf("select machine id: %v", err)
+	}
+	granted, err := HasGrant(t.Context(), f.store.DB(), machineID, env.EnvironmentID)
+	if err != nil {
+		t.Fatalf("HasGrant: %v", err)
+	}
+	if !granted {
+		t.Error("the created machine is not granted to the environment")
+	}
+
+	// 一覧を開き直すと credential はもう出ない。
+	if w := f.get(t, "/ui/machines"); strings.Contains(w.Body.String(), `class="credential"`) {
+		t.Error("the credential is shown again on a plain listing")
+	}
+}
+
+// **environment 画面からのサーバー作成でも、空の名前は弾く**(#7 の必須検証)。
+//
+// 弾いたときは machine 行を残さない(400 を返すだけで作らない)。
+func TestUICreateMachineForEnvRejectsAnEmptyName(t *testing.T) {
+	t.Parallel()
+
+	f := newUIFixture(t)
+	f.unseal(t)
+	env := f.seedSecret(t, "DATABASE_URL", testSecretValue)
+
+	w := f.post(t, envPath(env)+"/machines", url.Values{"name": {"   "}})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("empty name = %d, want 400 (body %q)", w.Code, w.Body.String())
+	}
+	var n int
+	if err := f.store.DB().QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM machines`).Scan(&n); err != nil {
+		t.Fatalf("count machines: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("%d machine rows were created for an empty name", n)
+	}
+}
+
+// **一覧に client_id を出さない**(#7)。作成・再発行時の credential ブロックだけが
+// client_id を見せ、サーバー一覧は名前で識別する。
+func TestUIMachineListOmitsClientID(t *testing.T) {
+	t.Parallel()
+
+	f := newUIFixture(t)
+	f.unseal(t)
+
+	const machineName = "billing-batch-server"
+	w := f.post(t, "/ui/machines", url.Values{"name": {machineName}})
+	if w.Code != http.StatusOK {
+		t.Fatalf("create machine = %d (body %q)", w.Code, w.Body.String())
+	}
+
+	// **client_id は生成値なので DB から読む**(テストデータの値に依存しない)。
+	var clientID string
+	if err := f.store.DB().QueryRowContext(t.Context(),
+		`SELECT client_id FROM machines`).Scan(&clientID); err != nil {
+		t.Fatalf("select client_id: %v", err)
+	}
+	if clientID == "" {
+		t.Fatal("test setup: the machine has no client_id")
+	}
+	// **作成時の credential ブロックは client_id を見せる**(反対側の取り違えを防ぐ)。
+	if !strings.Contains(w.Body.String(), clientID) {
+		t.Error("the creation page does not show the client_id in the credential block")
+	}
+
+	// **一覧には client_id が出ない。** 名前は識別子として出る。
+	body := f.get(t, "/ui/machines").Body.String()
+	if strings.Contains(body, clientID) {
+		t.Errorf("the machine list renders the client_id %q", clientID)
+	}
+	if !strings.Contains(body, machineName) {
+		t.Error("the machine list does not show the machine name")
+	}
+}
+
 // ユーザー作成では初期パスワードを一度だけ表示する。
 func TestUICreateUserShowsTheInitialPasswordOnce(t *testing.T) {
 	t.Parallel()

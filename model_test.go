@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -118,6 +119,82 @@ func TestValidateSecretValue(t *testing.T) {
 				t.Errorf("ValidateSecretValue(%s) = nil, want error", tt.name)
 			}
 		})
+	}
+}
+
+// **machine(サーバー) の表示名は必須で、制御文字・不正 UTF-8・上限超えを弾く。**
+//
+// 名前は一覧での唯一の識別子(client_id を出さない #7)なので空を許さない。
+// ValidateMachineName は **正規化済み** の値を受け取る前提なので、ここでは
+// NormalizeMachineName を通さず直接叩き、制御文字の扱いを厳密に固定する
+// (前後空白の除去は TestNormalizeMachineName が見る)。
+func TestValidateMachineName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		wantErr error
+	}{
+		{"ascii", "billing-batch", nil},
+		{"japanese", "請求バッチ", nil},
+		{"japanese with internal space", "請求 バッチ", nil},
+		{"ascii with internal space", "app server", nil},
+		{"max length", strings.Repeat("a", MaxMachineNameBytes), nil},
+
+		{"empty", "", errMachineNameEmpty},
+		{"over max length", strings.Repeat("a", MaxMachineNameBytes+1), errMachineNameTooLong},
+		{"internal newline", "line\nbreak", errMachineNameControl},
+		{"internal tab", "a\tb", errMachineNameControl},
+		{"nul byte", "a\x00b", errMachineNameControl},
+		{"escape", "esc\x1bhere", errMachineNameControl},
+		{"invalid utf-8", string([]byte{0xff, 0xfe}), errMachineNameControl},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateMachineName(tt.input)
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("ValidateMachineName(%q) = %v, want %v", tt.input, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// **NormalizeMachineName は前後の空白だけを削り、内部の空白と多バイト文字は残す。**
+//
+// 名前は秘密ではないので MK(ルール13)と違い trim してよい。空白のみの入力は
+// 空になり、そのまま検証すると errMachineNameEmpty で弾かれる(必須である)。
+func TestNormalizeMachineName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"leading and trailing spaces", "  app  ", "app"},
+		{"tabs and newlines", "\tapp\n", "app"},
+		{"internal space preserved", "a  b", "a  b"},
+		{"multibyte preserved", "請求バッチ", "請求バッチ"},
+		{"multibyte with internal space", "請求 バッチ", "請求 バッチ"},
+		{"multibyte trimmed", "  請求バッチ  ", "請求バッチ"},
+		{"whitespace only", "   ", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := NormalizeMachineName(tt.input); got != tt.want {
+				t.Errorf("NormalizeMachineName(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+
+	// **空白のみは trim で空になり、検証で弾かれる**(呼び出し側の順序を固定)。
+	if err := ValidateMachineName(NormalizeMachineName("   ")); !errors.Is(err, errMachineNameEmpty) {
+		t.Errorf("whitespace-only name = %v, want errMachineNameEmpty", err)
 	}
 }
 

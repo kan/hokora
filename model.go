@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -117,6 +119,9 @@ type Keyring struct {
 // MaxSecretValueBytes は secret 値の最大バイト数である(DESIGN §5.3)。
 const MaxSecretValueBytes = 64 << 10
 
+// MaxMachineNameBytes は machine(サーバー) 表示名の最大バイト数である。
+const MaxMachineNameBytes = 200
+
 // slug は URL パス(/ui/projects/{slug})にそのまま載る。大文字小文字の同一視や
 // パス記号の解釈で混乱しないよう、英小文字・数字・ハイフンに限る。
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
@@ -130,6 +135,44 @@ var (
 	errSecretValueNotUTF8  = errors.New("secret value is not valid UTF-8")
 	errSecretValueHasNUL   = errors.New("secret value contains a NUL byte")
 )
+
+// machine 名は秘密ではないため、エラーに値は含めない方針だけ揃える。
+var (
+	errMachineNameEmpty   = errors.New("machine name is required")
+	errMachineNameTooLong = fmt.Errorf("machine name exceeds %d bytes", MaxMachineNameBytes)
+	errMachineNameControl = errors.New("machine name is not valid UTF-8 or contains control characters")
+)
+
+// NormalizeMachineName は前後の空白を除いた machine(サーバー) 表示名を返す。
+//
+// 名前は秘密ではないので、MK(ルール13)と違い trim してよい。
+func NormalizeMachineName(name string) string {
+	return strings.TrimSpace(name)
+}
+
+// ValidateMachineName は machine(サーバー) の表示名を検証する。
+//
+// **名前は必須である。** 一覧では client_id を出さず、名前が唯一の識別子に
+// なるため(#7)。監査ログには machine の immutable ID を記録し name は入れない
+// ため(ルール24/25)、文字種は緩く許すが、表示やログ整形を乱す制御文字は拒否する。
+// 呼び出し側は NormalizeMachineName で trim した値を渡すこと。
+func ValidateMachineName(name string) error {
+	if name == "" {
+		return errMachineNameEmpty
+	}
+	if len(name) > MaxMachineNameBytes {
+		return errMachineNameTooLong
+	}
+	if !utf8.ValidString(name) {
+		return errMachineNameControl
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return errMachineNameControl
+		}
+	}
+	return nil
+}
 
 // validatePattern は識別子を正規表現で検証する。slug / key は秘密ではないため、
 // 直せるようにエラーへ値とパターンを含める。

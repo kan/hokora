@@ -1,26 +1,23 @@
 {{define "content"}}
-<h1>アプリ</h1>
+<h1>サーバー</h1>
+<p class="notice">サーバーは secret を取得する Web システム等です。各サーバーには credential（HOKORA_CLIENT_ID と HOKORA_CLIENT_SECRET の組）を発行し、アクセス権で「どの環境の secret を取得できるか」を割り当てます。</p>
 
 {{if .Credential}}
 <div class="credential">
-  <h2>{{if .Credential.Rotated}}credential を再発行しました{{else}}アプリを作成しました{{end}}</h2>
-  <p class="notice">この値はここでしか表示されません。いま控えてください。</p>
-  <dl>
-    <dt>HOKORA_CLIENT_ID</dt><dd><code>{{.Credential.ClientID}}</code></dd>
-    <dt>HOKORA_CLIENT_SECRET</dt><dd><code class="plaintext">{{.Credential.ClientSecret}}</code></dd>
-  </dl>
+  <h2>{{if .Credential.Rotated}}credential を再発行しました{{else}}サーバーを作成しました{{end}}</h2>
+  <p class="notice">この値はここでしか表示されません。いま控えてください。HOKORA_CLIENT_SECRET は再表示できず、失った場合は再発行になります。</p>
+  {{template "credential" .Credential}}
   <p><a href="/ui/machines">一覧へ戻る</a></p>
 </div>
 {{end}}
 
 <table class="machines">
-  <thead><tr><th>アプリ</th><th>状態</th><th>最終認証</th><th>grant</th><th>操作</th></tr></thead>
+  <thead><tr><th>サーバー</th><th>状態</th><th>最終認証</th><th>アクセス権</th><th>操作</th></tr></thead>
   <tbody>
   {{range $machine := .Machines}}
     <tr>
       <td>
         <div class="app-name">{{if $machine.Name}}{{$machine.Name}}{{else}}—{{end}}</div>
-        <code class="app-id">{{$machine.ClientID}}</code>
       </td>
       <td>{{if $machine.Disabled}}<span class="badge danger">無効</span>{{else}}有効{{end}}</td>
       <td class="nowrap">{{if $machine.LastAuthAt}}{{formatTime $machine.LastAuthAt}}{{else}}—{{end}}</td>
@@ -31,7 +28,7 @@
             <span class="grant-name">{{.ProjectSlug}}/{{.EnvSlug}}</span>
             <form method="post" action="/ui/machines/{{$machine.ID}}/grants/{{.EnvironmentID}}/delete" class="inline">
               {{template "csrf" $.CSRFToken}}
-              <button type="submit" class="linkish danger" title="grant を削除">×</button>
+              <button type="submit" class="linkish danger" title="アクセス権を削除">×</button>
             </form>
           </li>
         {{end}}
@@ -43,7 +40,7 @@
             <option value="" disabled selected>環境を選択</option>
             {{range $.Grantable}}<option value="{{.EnvironmentID}}">{{.ProjectSlug}} / {{.EnvSlug}}</option>{{end}}
           </select>
-          <button type="submit">追加</button>
+          <button type="submit">アクセス権を追加</button>
         </form>
         {{end}}
       </td>
@@ -61,16 +58,16 @@
       </td>
     </tr>
   {{else}}
-    <tr><td colspan="5" class="empty">アプリがありません。</td></tr>
+    <tr><td colspan="5" class="empty">サーバーがありません。</td></tr>
   {{end}}
   </tbody>
 </table>
 
-<h2>アプリを作成</h2>
+<h2>サーバーを作成</h2>
 <form method="post" action="/ui/machines" class="card">
   {{template "csrf" .CSRFToken}}
-  <label>名前 <input type="text" name="name" placeholder="例: 請求バッチ"></label>
-  <p class="hint">client_id はサーバーが自動生成します。</p>
+  <label>名前 <input type="text" name="name" required placeholder="例: 請求バッチ"></label>
+  <p class="hint">名前は一覧での識別に使います。credential（client_id と client_secret）はサーバーが自動生成し、作成後に一度だけ表示します。</p>
   <button type="submit">作成</button>
 </form>
 {{end}}

@@ -2,6 +2,15 @@
 <h1>{{.Env.ProjectSlug}} / {{.Env.EnvSlug}}</h1>
 <p class="crumbs"><a href="/ui/">プロジェクト</a> / <a href="/ui/projects/{{.Env.ProjectSlug}}">{{.Env.ProjectSlug}}</a> / {{.Env.EnvSlug}}</p>
 
+{{if .Credential}}
+<div class="credential">
+  <h2>サーバーを作成しました</h2>
+  <p class="notice">この環境へのアクセス権を持つサーバーを作成しました。この値はここでしか表示されません。いま控えてください。HOKORA_CLIENT_SECRET は再表示できず、失った場合は再発行になります。</p>
+  {{template "credential" .Credential}}
+  <p><a href="/ui/machines">サーバー一覧へ</a></p>
+</div>
+{{end}}
+
 <p class="notice">値は常にマスクされています。表示するには「表示」を押してください（監査ログに記録されます）。</p>
 
 <table>
@@ -38,5 +47,13 @@
   <label>値 <textarea name="value" rows="3" required></textarea></label>
   <p class="hint">同じ key を指定すると新しい版として追記されます。</p>
   <button type="submit">保存</button>
+</form>
+
+<h2>この環境にアクセスするサーバーを作成</h2>
+<form method="post" action="/ui/projects/{{.Env.ProjectSlug}}/{{.Env.EnvSlug}}/machines" class="card">
+  {{template "csrf" .CSRFToken}}
+  <label>名前 <input type="text" name="name" required placeholder="例: 請求バッチ"></label>
+  <p class="hint">この環境（{{.Env.ProjectSlug}} / {{.Env.EnvSlug}}）へのアクセス権を持つサーバーを作成し、credential を一度だけ表示します。他の環境へのアクセス権はサーバー画面から追加できます。</p>
+  <button type="submit">作成</button>
 </form>
 {{end}}

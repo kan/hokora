@@ -144,29 +144,94 @@ func verifyMachineCredentials(ctx context.Context, q querier, clientID, secret s
 //
 // 監査は fail closed(作成はセキュリティを下げる方向の操作である)。
 func CreateMachine(ctx context.Context, db *sql.DB, clientID, name string, ac auditCtx) (id int64, secret string, err error) {
-	secret, hash, err := GenerateClientSecret()
+	var hash []byte
+	name, secret, hash, err = prepareMachine(name)
 	if err != nil {
 		return 0, "", err
 	}
 
 	err = withTx(ctx, db, func(tx *sql.Tx) error {
-		at := ac.Now.Unix()
-		res, err := tx.ExecContext(ctx, `
-			INSERT INTO machines (client_id, secret_hash, name, disabled, created_at, updated_at)
-			VALUES (?, ?, ?, 0, ?, ?)`, clientID, hash, name, at, at)
-		if err != nil {
-			return fmt.Errorf("insert machine: %w", err)
-		}
-		if id, err = res.LastInsertId(); err != nil {
-			return fmt.Errorf("insert machine: %w", err)
-		}
-		// fail closed: 監査が書けなければ machine も作らない。
-		return RecordAudit(ctx, tx, ac.machineEntry(ActionMachineCreate, id))
+		id, err = insertMachineTx(ctx, tx, clientID, hash, name, ac)
+		return err
 	})
 	if err != nil {
 		return 0, "", err
 	}
 	return id, secret, nil
+}
+
+// prepareMachine は machine 作成の共通前処理である。名前を正規化・検証し、
+// client_secret(と保存用ハッシュ)を生成する。返す name は正規化済み。
+//
+// **CreateMachine と CreateMachineWithGrant の共通の入口。** 名前検証を
+// crypto/rand の消費や tx 開始より前に済ませ、両者で振る舞いをずらさない。
+func prepareMachine(name string) (normalized, secret string, hash []byte, err error) {
+	// 名前は必須。一覧では client_id を出さず名前で識別するため(#7)。
+	normalized = NormalizeMachineName(name)
+	if err := ValidateMachineName(normalized); err != nil {
+		return "", "", nil, err
+	}
+	secret, hash, err = GenerateClientSecret()
+	if err != nil {
+		return "", "", nil, err
+	}
+	return normalized, secret, hash, nil
+}
+
+// CreateMachineWithGrant は machine を作り、**同一トランザクション**で指定
+// environment への grant を与える。environment 画面からの作成導線(#9)で使う。
+//
+// **machine 作成と grant 付与を 1 トランザクションにまとめる。** 分けると grant
+// 付与だけ失敗したとき、credential を表示済みなのに権限の無い machine が残る。
+// どちらの監査も fail closed(create 操作。ルール26)なので、片方でも監査が
+// 書けなければ両方を rollback する。
+//
+// Vault のロックは取らない(DB のみを触る)ため、ロック順序(ルール67)には
+// 関与しない。CreateMachine + CreateGrant の逐次実行と等価だが、失敗時の
+// 中間状態を残さない点だけが異なる。
+func CreateMachineWithGrant(ctx context.Context, db *sql.DB, clientID, name string, environmentID int64, ac auditCtx) (id int64, secret string, err error) {
+	var hash []byte
+	name, secret, hash, err = prepareMachine(name)
+	if err != nil {
+		return 0, "", err
+	}
+
+	err = withTx(ctx, db, func(tx *sql.Tx) error {
+		id, err = insertMachineTx(ctx, tx, clientID, hash, name, ac)
+		if err != nil {
+			return err
+		}
+		return insertGrantTx(ctx, tx, id, environmentID, ac)
+	})
+	if err != nil {
+		return 0, "", err
+	}
+	return id, secret, nil
+}
+
+// insertMachineTx は machine 行を追記し、作成の監査を記録する。fail closed。
+//
+// **CreateMachine と CreateMachineWithGrant で共通の tx 本体である。**
+// **name は検証済みであること**を前提にする(prepareMachine 経由)。この関数
+// 自身は name を検証しないので、新たな呼び出し側を足すときは prepareMachine を
+// 通すこと。
+func insertMachineTx(ctx context.Context, tx *sql.Tx, clientID string, hash []byte, name string, ac auditCtx) (int64, error) {
+	at := ac.Now.Unix()
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO machines (client_id, secret_hash, name, disabled, created_at, updated_at)
+		VALUES (?, ?, ?, 0, ?, ?)`, clientID, hash, name, at, at)
+	if err != nil {
+		return 0, fmt.Errorf("insert machine: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("insert machine: %w", err)
+	}
+	// fail closed: 監査が書けなければ machine も作らない。
+	if err := RecordAudit(ctx, tx, ac.machineEntry(ActionMachineCreate, id)); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 // DisableMachine は machine を無効化し、そのトークンを全て失効させる(C8)。

@@ -325,24 +325,33 @@ func DeleteEnvironment(ctx context.Context, db *sql.DB, projectSlug, envSlug str
 // 存在しない ID は弾かれる。
 func CreateGrant(ctx context.Context, db *sql.DB, machineID, environmentID int64, ac auditCtx) error {
 	return withTx(ctx, db, func(tx *sql.Tx) error {
-		env, err := FindEnvironmentByID(ctx, tx, environmentID)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO machine_grants (machine_id, environment_id, created_at) VALUES (?, ?, ?)`,
-			machineID, env.EnvironmentID, ac.Now.Unix()); err != nil {
-			return fmt.Errorf("insert grant: %w", err)
-		}
-
-		target := env.ProjectSlug + "/" + env.EnvSlug
-		entry := ac.entry(ActionGrantCreate, ResultSuccess, nil)
-		entry.Target = &target
-		entry.TargetProjectID = &env.ProjectID
-		entry.TargetEnvironmentID = &env.EnvironmentID
-		entry.TargetMachineID = &machineID
-		return RecordAudit(ctx, tx, entry)
+		return insertGrantTx(ctx, tx, machineID, environmentID, ac)
 	})
+}
+
+// insertGrantTx は grant 行を追記し、作成の監査を記録する。fail closed。
+//
+// **CreateGrant と CreateMachineWithGrant(#9)で共通の tx 本体である。**
+// FindEnvironmentByID が祖先の deleted_at を検査するので、論理削除済みや
+// 存在しない ID は弾かれる(ルール54/58)。
+func insertGrantTx(ctx context.Context, tx *sql.Tx, machineID, environmentID int64, ac auditCtx) error {
+	env, err := FindEnvironmentByID(ctx, tx, environmentID)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO machine_grants (machine_id, environment_id, created_at) VALUES (?, ?, ?)`,
+		machineID, env.EnvironmentID, ac.Now.Unix()); err != nil {
+		return fmt.Errorf("insert grant: %w", err)
+	}
+
+	target := env.ProjectSlug + "/" + env.EnvSlug
+	entry := ac.entry(ActionGrantCreate, ResultSuccess, nil)
+	entry.Target = &target
+	entry.TargetProjectID = &env.ProjectID
+	entry.TargetEnvironmentID = &env.EnvironmentID
+	entry.TargetMachineID = &machineID
+	return RecordAudit(ctx, tx, entry)
 }
 
 // DeleteGrant は grant を削除する。

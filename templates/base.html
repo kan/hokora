@@ -1,4 +1,8 @@
 {{define "csrf"}}<input type="hidden" name="csrf_token" value="{{.}}">{{end}}
+{{define "credential"}}<dl>
+    <dt>HOKORA_CLIENT_ID</dt><dd><code>{{.ClientID}}</code></dd>
+    <dt>HOKORA_CLIENT_SECRET</dt><dd><code class="plaintext">{{.ClientSecret}}</code></dd>
+  </dl>{{end}}
 {{define "base"}}<!doctype html>
 <html lang="ja">
 <head>
@@ -14,7 +18,7 @@
   {{if .User}}
   <nav>
     <a href="/ui/">プロジェクト</a>
-    <a href="/ui/machines">アプリ</a>
+    <a href="/ui/machines">サーバー</a>
     <a href="/ui/users">ユーザー</a>
     <a href="/ui/audit">監査ログ</a>
   </nav>

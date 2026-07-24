@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Create a server directly from an environment page.** The environment view
+  now has a form that creates a machine and grants it access to that
+  environment in a single transaction, showing the credential once. Previously
+  this took two separate steps (create the machine, then add a grant).
+
+### Changed
+
+- **Web UI terminology.** The machine entity is now labelled 「サーバー」 (was
+  「アプリ」, which operators found ambiguous) and a grant is labelled
+  「アクセス権」 throughout the Web UI. The `machine` / `grant` terms are
+  unchanged in the schema, audit actions, API, and SDK.
+- **A machine name is now required, and the list no longer shows `client_id`.**
+  The `client_id` is shown once — with the secret — at creation and rotation,
+  so the list identifies a machine by its name instead. The name is validated
+  server-side (non-empty, no control characters, ≤ 200 bytes).
+- **Each Web UI screen now explains its concepts** — a サーバー is a Web system
+  等 that fetches secrets, アクセス権 grants access to an environment's secrets,
+  and what a credential is.
+
 ## [0.3.0] - 2026-07-23
 
 ### Changed

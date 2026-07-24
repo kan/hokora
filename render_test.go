@@ -67,7 +67,7 @@ var pageMarkers = map[string]string{
 	"error.html":       "ダッシュボードへ戻る",
 	"history.html":     " の履歴",
 	"login.html":       `action="/ui/login"`,
-	"machines.html":    "アプリを作成",
+	"machines.html":    "サーバーは secret を取得する",
 	"password.html":    `name="confirm_password"`,
 	"project.html":     "環境を作成",
 	"reveal.html":      `<pre class="plaintext">`,

@@ -182,6 +182,144 @@ func TestCreateMachineFailsClosedWhenAuditIsBroken(t *testing.T) {
 	}
 }
 
+// **CreateMachine は名前をサーバー側で検証する**(#7)。空の名前は弾き、
+// machine 行を 1 つも残さない(検証は crypto/rand の消費より前)。
+func TestCreateMachineRejectsAnEmptyName(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+
+	_, secret, err := CreateMachine(t.Context(), store.DB(), "app-prod", "  ",
+		auditCtx{Actor: ActorAnonymous, Now: vaultNow})
+	if !errors.Is(err, errMachineNameEmpty) {
+		t.Fatalf("error = %v, want errMachineNameEmpty", err)
+	}
+	if secret != "" {
+		t.Error("a secret was returned for a machine that was not created")
+	}
+	var n int
+	if err := store.DB().QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM machines`).Scan(&n); err != nil {
+		t.Fatalf("count machines: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("%d machine rows were created for an invalid name", n)
+	}
+}
+
+// **CreateMachineWithGrant は machine 作成と grant 付与を 1 トランザクションに
+// まとめる**(#9)。成功すれば両方の監査が残り、grant が効く。grant 付与が
+// 失敗すれば machine 行ごと巻き戻る(credential を見せた権限なし machine を
+// 残さない)。
+func TestCreateMachineWithGrant(t *testing.T) {
+	t.Parallel()
+
+	ac := auditCtx{Actor: ActorAnonymous, Now: vaultNow}
+
+	countMachines := func(t *testing.T, store *Store) int {
+		t.Helper()
+		var n int
+		if err := store.DB().QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM machines`).Scan(&n); err != nil {
+			t.Fatalf("count machines: %v", err)
+		}
+		return n
+	}
+
+	t.Run("success creates the machine and grant atomically", func(t *testing.T) {
+		t.Parallel()
+
+		store := newTestStore(t)
+		projectID := insertProject(t, store.DB(), testProjectSlug, false)
+		envID := insertEnvironment(t, store.DB(), projectID, testEnvSlug, false)
+
+		id, secret, err := CreateMachineWithGrant(t.Context(), store.DB(), "app-prod", "請求バッチ", envID, ac)
+		if err != nil {
+			t.Fatalf("CreateMachineWithGrant: %v", err)
+		}
+		if id <= 0 {
+			t.Fatalf("machine id = %d, want a positive row id", id)
+		}
+		// **secret はサーバー生成の base64url**(ルール 8)。往復で使える形。
+		if _, decErr := base64.RawURLEncoding.DecodeString(secret); decErr != nil {
+			t.Errorf("the returned secret is not base64url: %v", decErr)
+		}
+
+		granted, err := HasGrant(t.Context(), store.DB(), id, envID)
+		if err != nil {
+			t.Fatalf("HasGrant: %v", err)
+		}
+		if !granted {
+			t.Error("the grant was not created")
+		}
+
+		// **両方の監査が残る。**
+		if got := countAuditLogs(t, store.DB(), ActionMachineCreate); got != 1 {
+			t.Errorf("%d machine.create audit rows, want 1", got)
+		}
+		if got := countAuditLogs(t, store.DB(), ActionGrantCreate); got != 1 {
+			t.Errorf("%d grant.create audit rows, want 1", got)
+		}
+	})
+
+	t.Run("a nonexistent environment leaves no machine behind", func(t *testing.T) {
+		t.Parallel()
+
+		store := newTestStore(t)
+		insertProject(t, store.DB(), testProjectSlug, false)
+
+		_, secret, err := CreateMachineWithGrant(t.Context(), store.DB(), "app-prod", "請求バッチ", 999999, ac)
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("error = %v, want ErrNotFound", err)
+		}
+		if secret != "" {
+			t.Error("a secret was returned for a machine that was rolled back")
+		}
+		// **machine 行が巻き戻っていること**(grant 付与失敗で machine を残さない)。
+		if n := countMachines(t, store); n != 0 {
+			t.Errorf("%d machine rows survived a failed grant", n)
+		}
+		if got := countAuditLogs(t, store.DB(), ActionMachineCreate); got != 0 {
+			t.Errorf("%d machine.create audit rows survived the rollback, want 0", got)
+		}
+	})
+
+	t.Run("a soft-deleted environment leaves no machine behind", func(t *testing.T) {
+		t.Parallel()
+
+		store := newTestStore(t)
+		projectID := insertProject(t, store.DB(), testProjectSlug, false)
+		envID := insertEnvironment(t, store.DB(), projectID, testEnvSlug, true) // deleted_at 設定済み
+
+		_, _, err := CreateMachineWithGrant(t.Context(), store.DB(), "app-prod", "請求バッチ", envID, ac)
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("error = %v, want ErrNotFound (a soft-deleted environment must be treated as absent)", err)
+		}
+		if n := countMachines(t, store); n != 0 {
+			t.Errorf("%d machine rows survived a grant to a deleted environment", n)
+		}
+	})
+
+	t.Run("an invalid name is rejected before any row", func(t *testing.T) {
+		t.Parallel()
+
+		store := newTestStore(t)
+		projectID := insertProject(t, store.DB(), testProjectSlug, false)
+		envID := insertEnvironment(t, store.DB(), projectID, testEnvSlug, false)
+
+		_, secret, err := CreateMachineWithGrant(t.Context(), store.DB(), "app-prod", "", envID, ac)
+		if !errors.Is(err, errMachineNameEmpty) {
+			t.Fatalf("error = %v, want errMachineNameEmpty", err)
+		}
+		if secret != "" {
+			t.Error("a secret was returned for an invalid name")
+		}
+		if n := countMachines(t, store); n != 0 {
+			t.Errorf("%d machine rows were created for an invalid name", n)
+		}
+	})
+}
+
 // 存在しない machine への revoke は ErrNotFound になる。
 //
 // **UPDATE が 0 行に当たったことを「成功」と扱うと、無効化したつもりの
