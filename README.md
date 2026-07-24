@@ -125,6 +125,13 @@ hokora earns its extra moving parts only when you want:
   `hokora-client` (app-host client; **standard library only**, ~9 MB vs ~20 MB).
   Go apps skip the client and import the `sdk/` package directly.
 
+> **Web UI labels (Japanese).** This README, the code, and the API use the
+> English technical terms; the Web UI shows Japanese labels. The two that are
+> not obvious cognates: a *machine* is labelled 「サーバー」 and a *grant* is
+> labelled 「アクセス権」. (`machine` / `grant` remain the terms in the schema,
+> audit actions, and SDK.) See the glossary in
+> [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
 Design details: [docs/DESIGN.md](docs/DESIGN.md). Milestones and status:
 [docs/ROADMAP.md](docs/ROADMAP.md).
 

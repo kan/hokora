@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Each Web UI screen now explains its concepts** — a サーバー is a Web system
   等 that fetches secrets, アクセス権 grants access to an environment's secrets,
   and what a credential is.
+- **Docs: added a terminology glossary** (README, `docs/OPERATIONS.md`) mapping
+  the English technical terms — which the code, API, and docs keep — to the
+  Japanese Web UI labels (machine → サーバー, grant → アクセス権), so the UI
+  wording change does not diverge from the runbook.
 
 ## [0.3.0] - 2026-07-23
 
