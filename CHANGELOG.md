@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`hokora-client bulk`** prints every granted secret as one JSON object
+  (`{"KEY":"value",...}` plus a newline, keys sorted) to stdout. It exists for
+  applications that cannot use the SDK and read their configuration from a
+  script — a Perl `config/base.pl`, for instance, can pipe it through
+  `open my $fh, '-|', 'hokora-client', 'bulk'` instead of calling
+  `hokora-client get` once per key, which authenticated and made a round trip
+  every time. It takes no key arguments: the server's bulk endpoint reads and
+  audits every granted key regardless, so filtering client-side would suggest a
+  reduction in exposure that does not exist. A failure writes nothing to stdout
+  and exits non-zero, so a caller that checks the exit status cannot start with
+  a silently empty configuration. See `docs/OPERATIONS.md` §8.4 for the caveats
+  — coarser audit granularity than `get`, and no defence against T1-a.
+
 - **Create a server directly from an environment page.** The environment view
   now has a form that creates a machine and grants it access to that
   environment in a single transaction, showing the credential once. Previously

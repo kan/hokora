@@ -351,7 +351,72 @@ sudo hokora-client get DATABASE_URL  # 値を 1 行 stdout に出す
 - **端末での確認専用。** `hokora-client get KEY > file` のような**ファイル生成に
   使わない**（`.env` 出力＝`export` を実装しない方針と同じ理由）。
 
-### 8.4 `hokora-client run`（既存アプリの移行用）
+### 8.4 `hokora-client bulk`（SDK 化できないアプリの設定ファイル用）
+
+grant された secret を **JSON オブジェクト 1 個**として stdout に出す。
+
+```bash
+sudo hokora-client bulk
+# {"API_TOKEN":"...","DATABASE_URL":"..."}
+```
+
+- 出力は `{"KEY":"value",...}` + 改行 1 個。key は昇順。secret が 0 件でも
+  `{}` を返す（読み手のパーサが落ちない）。
+- **失敗時は stdout に何も書かず、非ゼロ終了する。** 空の JSON を返して
+  「secret が消えた設定」でアプリが起動する事故を避けるため。**読み手は必ず
+  終了コードを確認する**（下記 Perl 例の `close`）。
+
+**用途は、設定ファイルからパイプで読むことである。** Perl の
+`config/base.pl` のような設定ファイルから secret を取る場合、`get` を key の
+数だけ呼ぶと毎回 認証 + HTTP 往復が発生する。`bulk` なら 1 回で済む。
+
+```perl
+# config/base.pl
+use JSON::PP ();
+
+sub _hokora_secrets {
+    open my $fh, '-|', '/usr/local/bin/hokora-client', 'bulk'
+        or die "hokora-client: $!";
+    my $json = do { local $/; <$fh> };
+    close $fh or die "hokora-client bulk failed (exit @{[ $? >> 8 ]})";
+    return JSON::PP::decode_json($json);
+}
+
+my $secret = _hokora_secrets();
+
++{
+    db_dsn     => $secret->{DATABASE_URL},
+    api_token  => $secret->{API_TOKEN},
+};
+```
+
+- **`close` の戻り値を必ず見る。** 見ないと、サーバー停止・sealed・grant 削除の
+  ときに「空の設定で起動した」ことに気づけない。
+- **リスト形式の `open`（`'-|', $cmd, @args`）を使う。** 2 引数形式
+  （`open my $fh, "$cmd |"`）はシェルを経由するため、`--credentials` に渡す
+  パス等がシェルに解釈される余地が生まれる。
+- **credential ファイルは root:0600 である。** バッチ（crontab）を実行する
+  ユーザーから読ませるには、その machine 用の credential を当該ユーザー所有で
+  置くか（例: `/etc/hokora/credentials-batch`, `0600 batchuser:batchuser` を
+  `--credentials` で指定）、systemd timer に移して `LoadCredential=` を使う。
+  **credential を 0644 にしない。**
+
+**限界と注意:**
+
+- **`bulk` は grant 内の全 key を read するので、監査ログにも全 key 分の行が
+  残る**（`get` は指定した 1 key だけ）。プロセス起動のたびに全 key 分増える。
+  監査の success 記録は「漏洩したかもしれない」記録（THREAT_MODEL §10.5）なので、
+  インシデント時の切り分けはその粒度になる。
+- **ファイル生成に使わない。** `hokora-client bulk > secrets.json` は
+  `export`（`.env` 出力）を実装しない方針そのものに反する。**パイプで渡し、
+  ディスクに落とさない。**
+- **`run` と違い `/proc/<pid>/environ` には出ない**が、値は読み手プロセスの
+  メモリに載る。T1-a（アプリと同一 OS ユーザー）に対する防御にはならない
+  （そもそも credential を読めるので同じ secret を取得できる。THREAT_MODEL N2）。
+- 呼び出しごとに認証 + 取得が走る。**キャッシュしない**（DESIGN §11）。バッチが
+  毎分起動するなら、その頻度でサーバーへ往復する。
+
+### 8.5 `hokora-client run`（既存アプリの移行用）
 
 ```bash
 sudo hokora-client run -- /usr/local/bin/legacy-app --flag
@@ -364,7 +429,7 @@ sudo hokora-client run -- /usr/local/bin/legacy-app --flag
   （THREAT_MODEL R5）。**Go アプリでは SDK 方式を使うこと。** `hokora-client run`
   は SDK 化できない既存アプリの移行手段と位置づける。
 
-### 8.5 Web UI は JavaScript を前提とする
+### 8.6 Web UI は JavaScript を前提とする
 
 bfcache 対策（`static/bfcache.js`）のため、**Web UI は JavaScript 有効を前提と
 する**（DESIGN §9.3）。これは「JS は原則不要」の明示的な例外。無効だと、戻る
@@ -533,5 +598,5 @@ ssh vps 'hokora gen-key' | op document create --title 'hokora master-key-new'
 | アプリが 403 を受ける | grant の有無、project / environment が論理削除されていないか（削除は grant なしと同じ 403） |
 | Machine API が 503 / `sealed` | サーバーが sealed。unseal する（§3） |
 | 証明書更新後もエラー | SIGHUP のリロードに失敗し**旧証明書のまま**動いている可能性。運用ログを見て cert/key のペアと `current` symlink を確認（§7） |
-| Web UI で戻ると平文が残る | JavaScript が無効になっていないか（§8.5、DESIGN §9.3） |
+| Web UI で戻ると平文が残る | JavaScript が無効になっていないか（§8.6、DESIGN §9.3） |
 | firewalld を入れたのにアプリから届かない | rich rule の source / port と適用ゾーン（§4）。`firewall-cmd --list-rich-rules` |

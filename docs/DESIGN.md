@@ -1380,6 +1380,7 @@ hokora rotate-master             # §6.7
 
 # クライアント側(アプリホストに置く別バイナリ hokora-client)
 hokora-client get KEY            # 単一 secret を stdout へ(端末確認用)
+hokora-client bulk               # grant 内の全 secret を JSON で stdout へ(設定ファイル用)
 hokora-client run -- ./myapp     # 環境変数に展開(移行用)
 ```
 
@@ -1392,6 +1393,23 @@ hokora-client run -- ./myapp     # 環境変数に展開(移行用)
 **`hokora-client get` の位置づけ:** 端末での確認用である。
 **`hokora-client get KEY > file` のようにファイル生成に使ってはならない**
 (`export` を実装しない理由と同じ)。OPERATIONS.md に明記する。
+
+**`hokora-client bulk` の位置づけ:** **SDK 化できない既存アプリの設定ファイルが、
+パイプ経由で secret を読むための口である**(Perl の `config/base.pl` から
+`open my $fh, '-|', 'hokora-client', 'bulk'` で読む形)。`get` を key の数だけ
+呼ぶと認証 + HTTP 往復が key 数だけ発生するため、`/v1/secrets`(bulk)1 回に
+まとめる。
+
+- **出力は `{"KEY":"value",...}` + 改行 1 個**(key 昇順、0 件なら `{}`)。
+  失敗時は stdout に何も書かず非ゼロ終了する(空 JSON で起動する事故を防ぐ)。
+- **key を絞るオプションは用意しない。** サーバーは bulk エンドポイントで全
+  key を返し・監査するので、クライアント側で間引いても読まれた事実は変わらない。
+  「絞れば露出が減る」と誤解させる見せかけの機能を作らない。
+- **`get` より監査の粒度が粗い。** 呼び出しごとに grant 内の全 key が read
+  として記録される(THREAT_MODEL §10.5 の「漏洩したかもしれない」記録)。
+- **`> file` でファイル生成に使ってはならない**(`export` を実装しない理由と
+  同じ)。`run` と違い環境変数には出ないが、**T1-a に対する防御ではない**
+  (同じ credential で同じ secret を取得できる)。
 
 **`hokora-client get` の credential 経路:** `/etc/hokora/credentials` は
 root:0600 なので、人間が対話的に使う場合は `sudo hokora-client get` になる。
@@ -1597,7 +1615,7 @@ hokora/
 │   └── bfcache.js           # §9.3
 │
 ├── cmd/
-│   └── hokora-client/       # get / run(別バイナリ。標準ライブラリ + sdk のみ)
+│   └── hokora-client/       # get / bulk / run(別バイナリ。標準ライブラリ + sdk のみ)
 │       ├── main.go
 │       ├── client.go
 │       └── client_test.go

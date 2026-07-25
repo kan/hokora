@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"flag"
 	"io"
 	"net"
 	"net/http"
@@ -38,6 +39,10 @@ const (
 // grant は project/env の完全一致でモデル化する(不一致なら 403)。
 type fakeServer struct {
 	secrets map[string]string
+	// sealed が true なら、認証成功後の /v1/secrets 系エンドポイントを
+	// 503 sealed で応答する(cmdBulk が sealed のとき stdout に何も
+	// 書かないことの裏取り用)。
+	sealed bool
 }
 
 func (f *fakeServer) handler(t *testing.T) http.Handler {
@@ -64,6 +69,10 @@ func (f *fakeServer) handler(t *testing.T) http.Handler {
 			writeJSON(t, w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
 			return
 		}
+		if f.sealed {
+			writeJSON(t, w, http.StatusServiceUnavailable, map[string]string{"error": "sealed"})
+			return
+		}
 		// grant は project/env の一致で表現する。上書きフラグが実際に
 		// サーバーへ届いているかを、不一致→403 で観測できる。
 		if r.URL.Query().Get("project") != testProject || r.URL.Query().Get("env") != testEnv {
@@ -79,6 +88,10 @@ func (f *fakeServer) handler(t *testing.T) http.Handler {
 	mux.HandleFunc("GET /v1/secrets/{key}", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+testToken {
 			writeJSON(t, w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+			return
+		}
+		if f.sealed {
+			writeJSON(t, w, http.StatusServiceUnavailable, map[string]string{"error": "sealed"})
 			return
 		}
 		if r.URL.Query().Get("project") != testProject || r.URL.Query().Get("env") != testEnv {
@@ -116,11 +129,24 @@ type clientTestServer struct {
 
 func newClientTestServer(t *testing.T) *clientTestServer {
 	t.Helper()
-
-	f := &fakeServer{secrets: map[string]string{
+	return newClientTestServerWithSecrets(t, map[string]string{
 		"DATABASE_URL": testDBURL,
 		"API_TOKEN":    testAPIToken,
-	}}
+	})
+}
+
+// newClientTestServerWithSecrets は保持する secret を指定して fake サーバーを
+// 立てる(bulk の出力を key の内容ごと検証するため)。
+func newClientTestServerWithSecrets(t *testing.T, secrets map[string]string) *clientTestServer {
+	t.Helper()
+	return newClientTestServerFromFake(t, &fakeServer{secrets: secrets})
+}
+
+// newClientTestServerFromFake は既に組み立てた fakeServer(sealed 等の追加
+// 状態を持つもの)から fake サーバーを立てる。
+func newClientTestServerFromFake(t *testing.T, f *fakeServer) *clientTestServer {
+	t.Helper()
+
 	srv := httptest.NewTLSServer(f.handler(t))
 	t.Cleanup(srv.Close)
 
@@ -168,6 +194,206 @@ func TestCmdGetUnknownKey(t *testing.T) {
 	err := cmdGet(context.Background(), s.args("NOPE"))
 	if !errors.Is(err, sdk.ErrForbidden) {
 		t.Fatalf("error = %v, want sdk.ErrForbidden", err)
+	}
+}
+
+// runBulk は cmdBulk を成功前提で実行し、stdout を返す(失敗なら Fatal)。
+// 失敗を期待するテストは、期待するエラーを個別に検査するのでこれを使わない。
+func runBulk(t *testing.T, s *clientTestServer) string {
+	t.Helper()
+
+	var err error
+	stdout := captureStdout(t, func() {
+		err = cmdBulk(context.Background(), s.args())
+	})
+	if err != nil {
+		t.Fatalf("cmdBulk: %v", err)
+	}
+	return stdout
+}
+
+// bulk は grant された全 key を 1 個の JSON オブジェクトとして出す。
+func TestCmdBulk(t *testing.T) {
+	stdout := runBulk(t, newClientTestServer(t))
+
+	// **末尾は改行 1 個**(パイプの読み手が行として扱えるように)。
+	if !strings.HasSuffix(stdout, "\n") || strings.Count(stdout, "\n") != 1 {
+		t.Errorf("stdout = %q, want exactly one trailing newline", stdout)
+	}
+
+	var got map[string]string
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("stdout is not a JSON object: %v (%q)", err, stdout)
+	}
+	want := map[string]string{"DATABASE_URL": testDBURL, "API_TOKEN": testAPIToken}
+	if len(got) != len(want) {
+		t.Fatalf("got %d keys, want %d (%v)", len(got), len(want), got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q", k, got[k], v)
+		}
+	}
+}
+
+// 値に含まれる `&` `<` `>` が & 等にエスケープされず、そのまま往復すること
+// (SetEscapeHTML(false))。JSON としては同値だが、値を素直に保つ意図の裏取り。
+func TestCmdBulkDoesNotEscapeHTML(t *testing.T) {
+	stdout := runBulk(t, newClientTestServerWithSecrets(t, map[string]string{
+		"URL": "https://example.com/?a=1&b=<2>",
+	}))
+	if !strings.Contains(stdout, `&b=<2>`) {
+		t.Errorf("stdout = %q, want the raw & and <> to survive", stdout)
+	}
+
+	var got map[string]string
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("stdout is not a JSON object: %v", err)
+	}
+	if want := "https://example.com/?a=1&b=<2>"; got["URL"] != want {
+		t.Errorf("URL = %q, want %q", got["URL"], want)
+	}
+}
+
+// grant はあるが secret が 0 件でも、空オブジェクトとして正しい JSON を出す
+// (読み手の decode_json が落ちない)。
+func TestCmdBulkEmpty(t *testing.T) {
+	stdout := runBulk(t, newClientTestServerWithSecrets(t, map[string]string{}))
+	if stdout != "{}\n" {
+		t.Errorf("stdout = %q, want %q", stdout, "{}\n")
+	}
+}
+
+// bulk は位置引数を取らない(key を絞る指定は用意しない)。
+func TestCmdBulkRejectsArguments(t *testing.T) {
+	s := newClientTestServer(t)
+
+	if err := cmdBulk(context.Background(), s.args("DATABASE_URL")); err == nil {
+		t.Fatal("cmdBulk with a positional argument succeeded")
+	}
+}
+
+// grant が無ければ 403 を返し、**空の JSON を出さない**。設定ファイルから
+// パイプで読む用途では、静かに空を返すと「secret が消えた設定」で起動して
+// しまうため、失敗は失敗として伝える必要がある。
+func TestCmdBulkForbiddenPrintsNothing(t *testing.T) {
+	s := newClientTestServer(t)
+
+	var err error
+	stdout := captureStdout(t, func() {
+		err = cmdBulk(context.Background(), s.args("--project", "no-such-project"))
+	})
+	if !errors.Is(err, sdk.ErrForbidden) {
+		t.Fatalf("error = %v, want sdk.ErrForbidden", err)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing written on failure", stdout)
+	}
+}
+
+// サーバーが sealed なら 503 になり、**空の JSON を出さない**
+// (ForbiddenPrintsNothing と同じ懸念: 静かに空を返すと secret が消えた設定で
+// 起動してしまう)。
+func TestCmdBulkSealedPrintsNothing(t *testing.T) {
+	s := newClientTestServerFromFake(t, &fakeServer{
+		secrets: map[string]string{"DATABASE_URL": testDBURL},
+		sealed:  true,
+	})
+
+	var err error
+	stdout := captureStdout(t, func() {
+		err = cmdBulk(context.Background(), s.args())
+	})
+	if !errors.Is(err, sdk.ErrSealed) {
+		t.Fatalf("error = %v, want sdk.ErrSealed", err)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing written on failure", stdout)
+	}
+}
+
+// 誤った client_secret は 401 になり、**空の JSON を出さない**。
+func TestCmdBulkUnauthorizedPrintsNothing(t *testing.T) {
+	s := newClientTestServer(t)
+
+	credFile := filepath.Join(t.TempDir(), "credentials")
+	writeCredentials(t, credFile, map[string]string{
+		"HOKORA_ADDR":          s.url,
+		"HOKORA_CLIENT_ID":     testClientID,
+		"HOKORA_CLIENT_SECRET": "wrong-secret",
+		"HOKORA_PROJECT":       testProject,
+		"HOKORA_ENV":           testEnv,
+	})
+
+	var err error
+	stdout := captureStdout(t, func() {
+		err = cmdBulk(context.Background(), []string{"--credentials", credFile, "--ca", s.caFile})
+	})
+	if !errors.Is(err, sdk.ErrUnauthorized) {
+		t.Fatalf("error = %v, want sdk.ErrUnauthorized", err)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing written on failure", stdout)
+	}
+}
+
+// --credentials に存在しないファイルを渡すと、SDK の初期化(buildOpts /
+// sdk.New)より前に失敗し、**空の JSON を出さない**。
+func TestCmdBulkMissingCredentialsFilePrintsNothing(t *testing.T) {
+	var err error
+	stdout := captureStdout(t, func() {
+		err = cmdBulk(context.Background(), []string{
+			"--credentials", filepath.Join(t.TempDir(), "does-not-exist"),
+		})
+	})
+	if err == nil {
+		t.Fatal("cmdBulk with a nonexistent credentials file succeeded")
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing written on failure", stdout)
+	}
+}
+
+// key は昇順(バイト順)に並ぶ(encoding/json が map のキーをソートするため)。
+// 挿入順を意図的に崩し、出力上の出現位置がソート済みであることを確認する。
+func TestCmdBulkKeysAreSorted(t *testing.T) {
+	stdout := runBulk(t, newClientTestServerWithSecrets(t, map[string]string{
+		"ZEBRA": "z", "APPLE": "a", "MANGO": "m",
+	}))
+
+	idxApple := strings.Index(stdout, `"APPLE"`)
+	idxMango := strings.Index(stdout, `"MANGO"`)
+	idxZebra := strings.Index(stdout, `"ZEBRA"`)
+	if idxApple < 0 || idxMango < 0 || idxZebra < 0 {
+		t.Fatalf("stdout is missing an expected key: %q", stdout)
+	}
+	if idxApple > idxMango || idxMango > idxZebra {
+		t.Errorf("keys are not in ascending order: %q", stdout)
+	}
+}
+
+// 改行・引用符・バックスラッシュ・マルチバイト文字・空文字列を含む値が、
+// エンコード-デコードを経てそのまま往復すること。
+func TestCmdBulkRoundTripsSpecialCharacters(t *testing.T) {
+	want := map[string]string{
+		"MULTILINE": "line1\nline2",
+		"QUOTED":    `has "quotes" and \backslash\`,
+		"MULTIBYTE": "秘密の値😀",
+		"EMPTY":     "",
+	}
+	stdout := runBulk(t, newClientTestServerWithSecrets(t, want))
+
+	var got map[string]string
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v (%q)", err, stdout)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d keys, want %d (%v)", len(got), len(want), got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q", k, got[k], v)
+		}
 	}
 }
 
@@ -316,6 +542,25 @@ func TestCmdRunInheritsParentEnvironment(t *testing.T) {
 	}
 }
 
+// run が注入する secret は、同名の親環境変数を上書きする(secretsToMap の
+// 抽出後も childEnv = os.Environ() → append(secrets) の順序が保たれている
+// ことの裏取り。exec.Cmd.Env は同名キーが複数あれば最後の値が有効になる)。
+func TestCmdRunSecretOverridesParentEnv(t *testing.T) {
+	s := newClientTestServer(t)
+	t.Setenv("DATABASE_URL", "should-be-overridden")
+
+	var err error
+	stdout := captureStdout(t, func() {
+		err = cmdRun(context.Background(), s.args("--", "sh", "-c", `printf '%s' "$DATABASE_URL"`))
+	})
+	if err != nil {
+		t.Fatalf("cmdRun: %v", err)
+	}
+	if stdout != testDBURL {
+		t.Errorf("child saw DATABASE_URL = %q, want %q (secret should win over parent env)", stdout, testDBURL)
+	}
+}
+
 func TestCmdRunRequiresACommand(t *testing.T) {
 	s := newClientTestServer(t)
 	if err := cmdRun(context.Background(), s.args()); err == nil {
@@ -348,10 +593,10 @@ func TestCmdRunPropagatesExitCode(t *testing.T) {
 
 // get / run の --help は usage を stdout に出し、エラーにならない。
 func TestHelpFlags(t *testing.T) {
-	for _, name := range []string{"get", "run"} {
+	for _, name := range []string{"get", "bulk", "run"} {
 		t.Run(name, func(t *testing.T) {
 			handler := map[string]func(context.Context, []string) error{
-				"get": cmdGet, "run": cmdRun,
+				"get": cmdGet, "bulk": cmdBulk, "run": cmdRun,
 			}[name]
 
 			var err error
@@ -363,6 +608,31 @@ func TestHelpFlags(t *testing.T) {
 			}
 			if stdout == "" {
 				t.Errorf("%s --help printed no usage to stdout", name)
+			}
+		})
+	}
+}
+
+// commandFlags / parseFlags の共通化で done セマンティクスを壊していないか:
+// 未知のフラグはヘルプ扱いにならず、必ずエラーとして各コマンドに伝わる。
+func TestUnknownFlagIsRejected(t *testing.T) {
+	s := newClientTestServer(t)
+
+	for _, name := range []string{"get", "bulk", "run"} {
+		t.Run(name, func(t *testing.T) {
+			handler := map[string]func(context.Context, []string) error{
+				"get": cmdGet, "bulk": cmdBulk, "run": cmdRun,
+			}[name]
+
+			var err error
+			captureStdout(t, func() {
+				err = handler(context.Background(), s.args("--no-such-flag"))
+			})
+			if err == nil {
+				t.Fatalf("%s --no-such-flag succeeded, want an error", name)
+			}
+			if errors.Is(err, flag.ErrHelp) {
+				t.Errorf("%s --no-such-flag was treated as --help", name)
 			}
 		})
 	}

@@ -206,6 +206,8 @@ or, for non-Go / legacy apps being migrated:
 
 ```bash
 hokora-client get DATABASE_URL       # one value to stdout (terminal use only)
+hokora-client bulk                   # every granted secret as one JSON object,
+                                     # for a config file to read through a pipe
 hokora-client run -- ./legacy-app    # expands secrets into the env — see the
                                      # /proc caveat above; prefer the SDK
 ```

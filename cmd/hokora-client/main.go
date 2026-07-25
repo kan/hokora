@@ -25,6 +25,9 @@ Usage:
 
 Commands:
   get <KEY>       print a single secret value to stdout (terminal use only)
+  bulk            print every granted secret to stdout as one JSON object,
+                  for config files of non-Go apps to read through a pipe
+                  (reads — and audits — every granted key)
   run -- <cmd>    run a command with secrets in its environment (migration aid;
                   secrets are readable via /proc/<pid>/environ, use the SDK in Go apps)
 
@@ -48,6 +51,8 @@ func run(ctx context.Context, args []string) error {
 	switch cmd {
 	case "get":
 		return cmdGet(ctx, rest)
+	case "bulk":
+		return cmdBulk(ctx, rest)
 	case "run":
 		return cmdRun(ctx, rest)
 	case "help", "-h", "--help":

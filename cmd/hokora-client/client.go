@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -78,21 +80,52 @@ func loadCAPool(path string) (*x509.CertPool, error) {
 	return pool, nil
 }
 
+// commandFlags は共通フラグ付きの FlagSet を作る。エラー文言は自前で整形する
+// ため FlagSet 自身の出力は捨てる(--help のときだけ stdout に戻す)。
+func commandFlags(name string) (*flag.FlagSet, func() ([]sdk.Option, error)) {
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	return flags, clientOptions(flags)
+}
+
+// parseFlags は引数を解析する。done=true は「呼び出し側はここで戻ってよい」を
+// 意味する(`--help` は usage を stdout に出して err=nil、解析失敗は err 付き)。
+func parseFlags(flags *flag.FlagSet, args []string) (done bool, err error) {
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			flags.SetOutput(os.Stdout)
+			flags.Usage()
+			return true, nil
+		}
+		return true, fmt.Errorf("%s: %w", flags.Name(), err)
+	}
+	return false, nil
+}
+
+// secretsToMap は SDK の Secrets を map[string]string にする。
+//
+// **ここで作る文字列は Zero() で消せない**(Go の string は不変。SDK の
+// GetString の godoc が述べているとおり)。それでも GetString を使うのは、
+// JSON へのエンコード(bulk)も子プロセスの環境変数(run)も **Go の string を
+// 要求する**ためで、[]byte のまま渡す経路が無いからである
+// (encoding/json は []byte を base64 にしてしまう)。
+func secretsToMap(secrets *sdk.Secrets) map[string]string {
+	values := make(map[string]string, secrets.Len())
+	for _, key := range secrets.Keys() {
+		value, _ := secrets.GetString(key)
+		values[key] = value
+	}
+	return values
+}
+
 // cmdGet は単一の secret を stdout に出力する。
 //
 // **端末での確認用である**(DESIGN §10。`hokora-client get KEY > file` のような
 // ファイル生成に使ってはならない。`export` を実装しない理由と同じ)。
 func cmdGet(ctx context.Context, args []string) error {
-	flags := flag.NewFlagSet("get", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	buildOpts := clientOptions(flags)
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			flags.SetOutput(os.Stdout)
-			flags.Usage()
-			return nil
-		}
-		return fmt.Errorf("get: %w", err)
+	flags, buildOpts := commandFlags("get")
+	if done, err := parseFlags(flags, args); done {
+		return err
 	}
 	if flags.NArg() != 1 {
 		return errors.New("usage: hokora-client get [flags] KEY")
@@ -131,22 +164,93 @@ func cmdGet(ctx context.Context, args []string) error {
 	return nil
 }
 
+// cmdBulk は grant された secret を **JSON オブジェクト 1 個**として stdout に
+// 出力する(`{"KEY":"value",...}` + 改行)。key は昇順に並ぶ
+// (encoding/json が map のキーをソートするため)。
+//
+// **用途は、SDK 化できない既存アプリの設定ファイルからパイプで読むことである。**
+// 例えば Perl の `config/base.pl` から
+// `open my $fh, '-|', 'hokora-client', 'bulk'` で読む。`get` を key の数だけ
+// 呼ぶと、その都度 認証 + HTTP 往復が発生するため、これを 1 回にまとめる。
+//
+// **監査の粒度に注意する。** bulk は `/v1/secrets` を使うので、**grant 内の全
+// key が read として監査記録に残る**(`get` は指定した 1 key だけ)。プロセス
+// 起動のたびに全 key 分の監査行が増えることを織り込んで使う
+// (THREAT_MODEL §10.5: success は「漏洩したかもしれない」記録)。
+//
+// **ファイル生成に使ってはならない**(`hokora-client bulk > secrets.json` は
+// `export` を実装しない方針そのものに反する。DESIGN §10)。読み手のプロセスへ
+// パイプで渡し、ディスクに落とさない。
+func cmdBulk(ctx context.Context, args []string) error {
+	flags, buildOpts := commandFlags("bulk")
+	if done, err := parseFlags(flags, args); done {
+		return err
+	}
+	// 位置引数は取らない。**key を絞る指定は用意しない**: サーバー側は
+	// bulk エンドポイントで全 key を返し・監査するため、クライアントで
+	// 間引いても読まれた事実は変わらない。「絞れば露出が減る」と誤解させる
+	// 見せかけの機能を作らない。
+	if flags.NArg() != 0 {
+		return errors.New("usage: hokora-client bulk [flags]")
+	}
+
+	opts, err := buildOpts()
+	if err != nil {
+		return fmt.Errorf("bulk: %w", err)
+	}
+	client, err := sdk.New(opts...)
+	if err != nil {
+		return fmt.Errorf("bulk: %w", err)
+	}
+	secrets, err := client.Fetch(ctx)
+	if err != nil {
+		return fmt.Errorf("bulk: %w", err)
+	}
+	defer secrets.Zero()
+
+	values := secretsToMap(secrets)
+
+	// **一旦バッファに組み立ててから 1 回で書く。** 途中でエンコードに失敗した
+	// ときに、壊れた JSON の断片を stdout に残さないため。
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	// HTML エスケープを切る。既定では `&` `<` `>` が Unicode エスケープ形式に
+	// 置き換わる。パーサは同じ値に復元するので JSON としては同値だが、URL 等を
+	// 目視・grep で確認できるよう、値をそのままの形で出す。
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(values); err != nil {
+		// map[string]string のエンコードは値に起因して失敗しない
+		// (不正な UTF-8 は U+FFFD に置換される)。値がエラー文言に混ざる
+		// 経路は無い。
+		return fmt.Errorf("bulk: encode secrets: %w", err)
+	}
+	// values の string は消せない(secretsToMap のコメント)が、消せるバッファは
+	// 消す(best effort)。
+	defer zeroBytes(buf.Bytes())
+
+	if _, err := os.Stdout.Write(buf.Bytes()); err != nil {
+		return fmt.Errorf("bulk: write stdout: %w", err)
+	}
+	return nil
+}
+
+// zeroBytes は best effort でバッファを上書きする(SDK の Secrets.Zero と
+// 同じ位置づけ。swap / core dump は防げない)。
+func zeroBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
+
 // cmdRun は secret を環境変数に展開して子プロセスを起動する(移行用)。
 //
 // **T1-a の攻撃者が /proc/<pid>/environ から secret 値そのものを読める**
 // (THREAT_MODEL R5)。これは V1 を無効化する。**Go アプリケーションでは
 // SDK 方式を使うこと。** hokora-client run は既存アプリの移行用と位置づける。
 func cmdRun(ctx context.Context, args []string) error {
-	flags := flag.NewFlagSet("run", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	buildOpts := clientOptions(flags)
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			flags.SetOutput(os.Stdout)
-			flags.Usage()
-			return nil
-		}
-		return fmt.Errorf("run: %w", err)
+	flags, buildOpts := commandFlags("run")
+	if done, err := parseFlags(flags, args); done {
+		return err
 	}
 
 	// `hokora-client run [flags] -- cmd args...` の形。-- 以降が起動するコマンド。
@@ -170,8 +274,7 @@ func cmdRun(ctx context.Context, args []string) error {
 
 	// 子プロセスの環境に secret を足す。**親の環境は変更しない。**
 	childEnv := os.Environ()
-	for _, key := range secrets.Keys() {
-		value, _ := secrets.GetString(key)
+	for key, value := range secretsToMap(secrets) {
 		childEnv = append(childEnv, key+"="+value)
 	}
 	// SDK 側のバッファは消す(childEnv の string には残るが、それは
