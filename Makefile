@@ -1,7 +1,7 @@
 GO         ?= go
 BIN        ?= hokora
 CLIENT_BIN ?= hokora-client
-TIMEOUT    ?= 120s
+TIMEOUT    ?= 5m
 BINDIR     ?= bin
 
 # root 以外の go.mod。toolchain の宣言が root からずれていないかを
@@ -59,6 +59,10 @@ build-client:
 
 # 並行制御のバグは race detector なしでは見えない。既定で -race を付ける。
 # 暴走したテストで環境ごと固まらないよう -timeout を必ず指定する。
+#
+# **TIMEOUT は「暴走の検出」のためのものであり、遅いマシンの足切りではない。**
+# -race を付けた本体のテストは実測で 2 分を超えることがあり、既定を 120s に
+# していた頃は変更と無関係に落ちた。テストは増える一方なので余裕を持たせる。
 test:
 	@for m in $(MODULES); do \
 		echo "==> go test ($$m)"; \
