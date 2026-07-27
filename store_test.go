@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -950,6 +952,508 @@ func TestListAuditLogsReturnsTheNewestFirst(t *testing.T) {
 	}
 	if want := vaultNow.Add(4 * time.Minute).UTC(); !rows[0].At.Equal(want) {
 		t.Errorf("newest row at %v, want %v", rows[0].At, want)
+	}
+}
+
+// auditRowsByAction は監査行を action で引けるようにする。
+//
+// 同じ action が複数あるときは最新の 1 行を返す。
+func auditRowsByAction(t *testing.T, db *sql.DB) map[string]AuditRow {
+	t.Helper()
+
+	rows, err := ListAuditLogs(t.Context(), db, 100)
+	if err != nil {
+		t.Fatalf("ListAuditLogs: %v", err)
+	}
+	byAction := map[string]AuditRow{}
+	for _, r := range rows {
+		if _, seen := byAction[r.Action]; !seen {
+			byAction[r.Action] = r
+		}
+	}
+	return byAction
+}
+
+// **監査画面は actor と対象に名前を併記する**(#11)。
+//
+// 記録されるのは immutable な ID だけ(ルール 24)なので、画面がこれを解決
+// しないと `user:1` が誰なのか分からない。**対象も同じ問題を持つ。**
+// machine.* / user.* は target 列を持たず ID だけを記録するため、解決しないと
+// 「誰が何を無効化したのか」が画面から読めない。
+func TestListAuditLogsResolvesActorAndTargetNames(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	anon := secretAudit()
+
+	projectID := insertProject(t, store.DB(), testProjectSlug, false)
+	envID := insertEnvironment(t, store.DB(), projectID, testEnvSlug, false)
+
+	machineID, _, err := CreateMachine(t.Context(), store.DB(), "app-prod", "請求バッチ", anon)
+	if err != nil {
+		t.Fatalf("CreateMachine: %v", err)
+	}
+	userID, err := CreateUser(t.Context(), store.DB(), "alice", testPassword, true, anon)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	// Web UI 経由の操作(actor = user)と Machine API の認証(actor = machine)。
+	byUser := auditCtx{Actor: actorUser(userID), ActorUserID: &userID, Via: ViaWeb, Now: vaultNow}
+	if err := CreateGrant(t.Context(), store.DB(), machineID, envID, byUser); err != nil {
+		t.Fatalf("CreateGrant: %v", err)
+	}
+	if err := DeleteGrant(t.Context(), store.DB(), discardLogger(), machineID, envID, byUser); err != nil {
+		t.Fatalf("DeleteGrant: %v", err)
+	}
+	byMachine := auditCtx{Actor: actorMachine(machineID), ActorMachineID: &machineID, Now: vaultNow}
+	if err := RecordAudit(t.Context(), store.DB(), byMachine.machineEntry(ActionAuthMachine, machineID)); err != nil {
+		t.Fatalf("RecordAudit: %v", err)
+	}
+
+	var (
+		user    = fmt.Sprintf("alice (user:%d)", userID)
+		machine = fmt.Sprintf("請求バッチ (machine:%d)", machineID)
+		path    = testProjectSlug + "/" + testEnvSlug
+	)
+	tests := []struct {
+		action           string
+		actor, target    string
+		whyTargetMatters string
+	}{
+		{string(ActionMachineCreate), ActorAnonymous, machine,
+			"target 列を持たないので、解決しないと「何を作ったか」が空欄になる"},
+		{string(ActionUserCreate), ActorAnonymous, user,
+			"machine と同じく target 列を持たない"},
+		{string(ActionGrantCreate), user, machine + " → " + path,
+			"grant は machine と environment の組で 1 つの対象である"},
+		{string(ActionGrantDelete), user, machine + " → " + path,
+			"grant.delete は target 列を持たず environment_id だけを記録する"},
+		{string(ActionAuthMachine), machine, machine,
+			"machine が actor になる唯一の経路"},
+	}
+
+	byAction := auditRowsByAction(t, store.DB())
+	for _, tt := range tests {
+		t.Run(tt.action, func(t *testing.T) {
+			row, ok := byAction[tt.action]
+			if !ok {
+				t.Fatalf("no %s row was recorded", tt.action)
+			}
+			if row.Actor != tt.actor {
+				t.Errorf("actor = %q, want %q", row.Actor, tt.actor)
+			}
+			if row.Target != tt.target {
+				t.Errorf("target = %q, want %q (%s)", row.Target, tt.target, tt.whyTargetMatters)
+			}
+		})
+	}
+}
+
+// **名前が引けなくても行は表示できなければならない。**
+//
+// 名前を出すために監査行を落としたら、記録として成立しない。#7 より前に
+// 作られた空名の machine と、論理削除された project / environment を見る。
+// **監査は「その時点で何が起きたか」の記録なので、削除済みでも解決する**
+// (ルール 58 は secret の取得経路の話であり、ここには適用しない)。
+func TestListAuditLogsFallsBackWhenTheNameIsGone(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	ac := secretAudit()
+
+	// name を検証する CreateMachine(#7)では作れない、空名の既存データ。
+	res, err := store.DB().ExecContext(t.Context(), `
+		INSERT INTO machines (client_id, secret_hash, name, created_at, updated_at)
+		VALUES ('legacy', X'00', '', 0, 0)`)
+	if err != nil {
+		t.Fatalf("insert legacy machine: %v", err)
+	}
+	machineID, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("last insert id: %v", err)
+	}
+	projectID := insertProject(t, store.DB(), "gone", true)
+	envID := insertEnvironment(t, store.DB(), projectID, "old", true)
+
+	if err := RecordAudit(t.Context(), store.DB(), ac.machineEntry(ActionMachineDisable, machineID)); err != nil {
+		t.Fatalf("RecordAudit: %v", err)
+	}
+	entry := ac.entry(ActionGrantDelete, ResultSuccess, nil)
+	entry.TargetMachineID = &machineID
+	entry.TargetEnvironmentID = &envID
+	if err := RecordAudit(t.Context(), store.DB(), entry); err != nil {
+		t.Fatalf("RecordAudit: %v", err)
+	}
+
+	byAction := auditRowsByAction(t, store.DB())
+	ident := fmt.Sprintf("machine:%d", machineID)
+	if got := byAction[string(ActionMachineDisable)].Target; got != ident {
+		t.Errorf("target = %q, want the bare identifier %q", got, ident)
+	}
+	if want := ident + " → gone/old"; byAction[string(ActionGrantDelete)].Target != want {
+		t.Errorf("target = %q, want %q (削除済みでも監査は対象を示す)",
+			byAction[string(ActionGrantDelete)].Target, want)
+	}
+}
+
+// **名前が引けないことより、行が消えることの方が重い。**
+//
+// audit_logs は FK を持たない(ルール 57)ので、参照先の行が無い ID が残るのは
+// 異常ではなく正常な状態である。結合が内部結合になっていると、**その監査記録
+// そのものが画面から消える。** 名前を出すために記録を失うのは本末転倒であり、
+// これがこの変更で最も重い失敗モードである。
+func TestListAuditLogsKeepsRowsWhoseReferencesAreMissing(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	// machines / users / environments は空のまま。どの ID も参照先を持たない。
+	var (
+		missingUser    = int64(9001)
+		missingMachine = int64(9002)
+		missingEnv     = int64(9003)
+	)
+	byMissingUser := auditCtx{Actor: actorUser(missingUser), ActorUserID: &missingUser, Via: ViaWeb, Now: vaultNow}
+	byMissingMachine := auditCtx{Actor: actorMachine(missingMachine), ActorMachineID: &missingMachine, Now: vaultNow}
+
+	grantDelete := byMissingUser.entry(ActionGrantDelete, ResultSuccess, nil)
+	grantDelete.TargetMachineID = &missingMachine
+	grantDelete.TargetEnvironmentID = &missingEnv
+
+	entries := []AuditEntry{
+		// 参照を一切持たない行(seal)も、結合の追加で落ちてはならない。
+		secretAudit().entry(ActionSeal, ResultSuccess, nil),
+		byMissingMachine.entry(ActionAuthMachine, ResultSuccess, nil),
+		byMissingUser.userEntry(ActionUserDisable, missingUser),
+		byMissingUser.machineEntry(ActionMachineDisable, missingMachine),
+		grantDelete,
+	}
+	for _, e := range entries {
+		if err := RecordAudit(t.Context(), store.DB(), e); err != nil {
+			t.Fatalf("RecordAudit(%s): %v", e.Action, err)
+		}
+	}
+
+	rows, err := ListAuditLogs(t.Context(), store.DB(), 100)
+	if err != nil {
+		t.Fatalf("ListAuditLogs: %v", err)
+	}
+	// **増えるのも困る。** 結合先が複数行に増えると、1 回の操作が複数回
+	// 起きたように見える。
+	if len(rows) != len(entries) {
+		t.Fatalf("%d rows, want %d (the join must neither drop nor multiply audit rows)", len(rows), len(entries))
+	}
+
+	user := fmt.Sprintf("user:%d", missingUser)
+	machine := fmt.Sprintf("machine:%d", missingMachine)
+	want := map[string]struct{ actor, target string }{
+		string(ActionSeal):           {ActorAnonymous, ""},
+		string(ActionAuthMachine):    {machine, ""},
+		string(ActionUserDisable):    {user, user},
+		string(ActionMachineDisable): {user, machine},
+		// environment が引けないとき、'/' だけの path を作らない。
+		string(ActionGrantDelete): {user, machine},
+	}
+	for _, row := range rows {
+		w, ok := want[row.Action]
+		if !ok {
+			t.Errorf("unexpected action %q", row.Action)
+			continue
+		}
+		if row.Actor != w.actor {
+			t.Errorf("%s: actor = %q, want the bare identifier %q", row.Action, row.Actor, w.actor)
+		}
+		if row.Target != w.target {
+			t.Errorf("%s: target = %q, want %q", row.Action, row.Target, w.target)
+		}
+	}
+}
+
+// **上限は「監査行の件数」に効く。並びは同じ時刻でも決まる。**
+//
+// at は秒精度なので、続けて起きた操作は同じ時刻になる。時刻だけで並べると
+// 同秒の行の順序が不定になり、**上限で切ったときに直近の操作が落ちうる。**
+// 結合を足した後も、LIMIT が結合後の行数ではなく監査行に効いていることを見る。
+func TestListAuditLogsBreaksTiesByIDUnderTheLimit(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	anon := secretAudit()
+	machineID, _, err := CreateMachine(t.Context(), store.DB(), "app-prod", "web01", anon)
+	if err != nil {
+		t.Fatalf("CreateMachine: %v", err)
+	}
+
+	// CreateMachine の machine.create を含め、全て同じ時刻の行になる。
+	actions := []Action{
+		ActionMachineRotateSecret, ActionGrantCreate, ActionGrantDelete,
+		ActionMachineDisable, ActionAuthMachine,
+	}
+	for _, action := range actions {
+		if err := RecordAudit(t.Context(), store.DB(), anon.machineEntry(action, machineID)); err != nil {
+			t.Fatalf("RecordAudit(%s): %v", action, err)
+		}
+	}
+
+	const limit = 3
+	rows, err := ListAuditLogs(t.Context(), store.DB(), limit)
+	if err != nil {
+		t.Fatalf("ListAuditLogs: %v", err)
+	}
+	if len(rows) != limit {
+		t.Fatalf("%d rows, want %d", len(rows), limit)
+	}
+	target := fmt.Sprintf("web01 (machine:%d)", machineID)
+	for i, row := range rows {
+		if want := string(actions[len(actions)-1-i]); row.Action != want {
+			t.Errorf("rows[%d].Action = %q, want %q (the newest of the same second must come first)",
+				i, row.Action, want)
+		}
+		// 上限で切っても名前の解決は効いている。
+		if row.Target != target {
+			t.Errorf("rows[%d].Target = %q, want %q", i, row.Target, target)
+		}
+	}
+}
+
+// **列と構造体フィールドの対応を、行そのもので固定する。**
+//
+// この画面のクエリは SELECT の列順と Scan の引数順が一致していることだけを
+// 頼りにしている。名前解決のために列を足したり並べ替えたりすると、**取り違え
+// ても型が合ってしまう**(action / result / remote_addr / detail は全て文字列)。
+// 送信元や結果が別の列の値になった監査ログは、記録が無いより質が悪い。
+func TestListAuditLogsMapsEveryColumnToItsField(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	detail := &AuditDetail{
+		Reason:        ptr(ReasonInvalidCredentials),
+		Via:           ptr(ViaWeb),
+		SubjectDigest: ptr(subjectDigest("ghost")),
+	}
+	ac := auditCtx{Actor: ActorAnonymous, Via: ViaWeb, RemoteAddr: ptr("10.8.0.9"), Now: vaultNow}
+	if err := RecordAudit(t.Context(), store.DB(), ac.entry(ActionAuthUser, ResultFailure, detail)); err != nil {
+		t.Fatalf("RecordAudit: %v", err)
+	}
+	// entry() は detail を値でコピーするので、渡した構造体をそのまま
+	// marshal したものが行に入っている。
+	wantDetail, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatalf("marshal detail: %v", err)
+	}
+
+	rows, err := ListAuditLogs(t.Context(), store.DB(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditLogs: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("%d rows, want 1", len(rows))
+	}
+	row := rows[0]
+	if !row.At.Equal(vaultNow) {
+		t.Errorf("At = %v, want %v", row.At, vaultNow.UTC())
+	}
+	for _, f := range []struct{ field, got, want string }{
+		{"Actor", row.Actor, ActorAnonymous},
+		{"Action", row.Action, string(ActionAuthUser)},
+		{"Target", row.Target, ""},
+		{"Result", row.Result, string(ResultFailure)},
+		{"RemoteAddr", row.RemoteAddr, "10.8.0.9"},
+		{"Detail", row.Detail, string(wantDetail)},
+	} {
+		if f.got != f.want {
+			t.Errorf("%s = %q, want %q", f.field, f.got, f.want)
+		}
+	}
+}
+
+// **名前は記録側に入れない。表示のときに現在の値を引く**(ルール 24)。
+//
+// 記録時の名前を行に持たせると、改名の前後で同じ主体の行が別物に見え、
+// 追跡が切れる。行には ID しか入っていないこと、そして改名すると**過去の行の
+// 表示も追随する**ことの両方を見る。片方だけだと、記録側に名前を書き込む
+// 実装に変えても気付けない。
+func TestAuditRowsRecordIdentifiersNotNames(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	anon := secretAudit()
+	projectID := insertProject(t, store.DB(), testProjectSlug, false)
+	envID := insertEnvironment(t, store.DB(), projectID, testEnvSlug, false)
+
+	const machineName = "shukka-batch"
+	const username = "operator"
+	machineID, _, err := CreateMachine(t.Context(), store.DB(), "app-prod", machineName, anon)
+	if err != nil {
+		t.Fatalf("CreateMachine: %v", err)
+	}
+	userID, err := CreateUser(t.Context(), store.DB(), username, testPassword, true, anon)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	byUser := auditCtx{Actor: actorUser(userID), ActorUserID: &userID, Via: ViaWeb, Now: vaultNow}
+	if err := CreateGrant(t.Context(), store.DB(), machineID, envID, byUser); err != nil {
+		t.Fatalf("CreateGrant: %v", err)
+	}
+
+	raw, err := store.DB().QueryContext(t.Context(),
+		`SELECT actor, COALESCE(target, '') FROM audit_logs`)
+	if err != nil {
+		t.Fatalf("select audit_logs: %v", err)
+	}
+	defer func() {
+		if err := raw.Close(); err != nil {
+			t.Errorf("close rows: %v", err)
+		}
+	}()
+
+	idents := map[string]struct{}{
+		ActorAnonymous: {}, actorUser(userID): {}, actorMachine(machineID): {},
+	}
+	for raw.Next() {
+		var actor, target string
+		if err := raw.Scan(&actor, &target); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if _, ok := idents[actor]; !ok {
+			t.Errorf("actor column = %q; the row must hold an immutable identifier only", actor)
+		}
+		for _, name := range []string{machineName, username} {
+			if strings.Contains(actor+" "+target, name) {
+				t.Errorf("the row (%q / %q) contains the name %q; renaming would rewrite history",
+					actor, target, name)
+			}
+		}
+	}
+	if err := raw.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+
+	// 改名しても行は変わらないので、表示だけが現在の名前に追随する。
+	if _, err := store.DB().ExecContext(t.Context(),
+		`UPDATE machines SET name = 'renamed' WHERE id = ?`, machineID); err != nil {
+		t.Fatalf("rename machine: %v", err)
+	}
+	byAction := auditRowsByAction(t, store.DB())
+	if want := fmt.Sprintf("renamed (machine:%d)", machineID); byAction[string(ActionMachineCreate)].Target != want {
+		t.Errorf("target = %q, want %q (the name is resolved at display time)",
+			byAction[string(ActionMachineCreate)].Target, want)
+	}
+}
+
+// **識別子は必ず残す。**
+//
+// machines.name に UNIQUE 制約は無く、名前は後から変えられる。名前だけの表示に
+// すると、同名の machine を区別できず、監査の追跡が名前の一意性という
+// **成り立っていない前提**に乗る(ルール 24)。
+func TestAuditSubjectAlwaysShowsTheIdentifier(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		ident, disp string
+		want        string
+	}{
+		{"名前が引ければ併記する", "user:1", "alice", "alice (user:1)"},
+		{"名前が無ければ識別子だけを出す", "machine:3", "", "machine:3"},
+		{"名前が識別子を騙っても識別子は落とさない", "machine:3", "machine:9", "machine:9 (machine:3)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := auditSubject(tt.ident, tt.disp); got != tt.want {
+				t.Errorf("auditSubject(%q, %q) = %q, want %q", tt.ident, tt.disp, got, tt.want)
+			}
+		})
+	}
+}
+
+// **対象の表示は、DB 経由では作れない組み合わせも含めて閉じている必要がある。**
+//
+// どの列が埋まるかは action ごとに違い、実装は action を見ずに列の有無だけで
+// 組み立てる。実際に起きる組み合わせだけを DB 経由で確かめると、**まだ無い
+// action を足したときに初めて壊れる。**
+func TestAuditTargetPrefersTheRecordedTargetColumn(t *testing.T) {
+	t.Parallel()
+
+	id := func(v int64) sql.NullInt64 { return sql.NullInt64{Int64: v, Valid: true} }
+
+	tests := []struct {
+		name string
+		refs auditTargetRefs
+		want string
+		why  string
+	}{
+		{
+			name: "対象を持たない",
+			refs: auditTargetRefs{},
+			want: "",
+			why:  "seal / logout は対象を持たない。何かを組み立てると嘘になる",
+		},
+		{
+			name: "machine だけ",
+			refs: auditTargetRefs{MachineID: id(3), MachineName: "web01"},
+			want: "web01 (machine:3)",
+			why:  "machine.* は target 列を持たず、解決しないと空欄になる",
+		},
+		{
+			name: "user だけ",
+			refs: auditTargetRefs{UserID: id(1), UserName: "alice"},
+			want: "alice (user:1)",
+			why:  "user.* も同じく target 列を持たない",
+		},
+		{
+			name: "machine と user が両方立つ",
+			refs: auditTargetRefs{MachineID: id(3), UserID: id(1)},
+			want: "machine:3 → user:1",
+			why:  "順序が固定でないと、同じ形の行が読み手ごとに別の意味に見える",
+		},
+		{
+			name: "target 列だけ",
+			refs: auditTargetRefs{Stored: "DATABASE_URL"},
+			want: "DATABASE_URL",
+			why:  "item の key は ID から引き直せない",
+		},
+		{
+			name: "machine と target 列",
+			refs: auditTargetRefs{MachineID: id(3), MachineName: "web01", Stored: "myapp/prod"},
+			want: "web01 (machine:3) → myapp/prod",
+			why:  "grant.create は machine と environment の組で 1 つの対象である",
+		},
+		{
+			name: "target 列と environment の両方が引ける",
+			refs: auditTargetRefs{Stored: "myapp/prod", ProjectSlug: "myapp", EnvSlug: "staging"},
+			want: "myapp/prod",
+			why:  "記録時点の文字列を優先する。現在の値で上書きすると、その時どう見えていたかが失われる",
+		},
+		{
+			name: "environment だけ引ける",
+			refs: auditTargetRefs{ProjectSlug: "myapp", EnvSlug: "prod"},
+			want: "myapp/prod",
+			why:  "grant.delete は target 列を持たず environment_id だけを記録する",
+		},
+		{
+			name: "environment は引けたが project が引けない",
+			refs: auditTargetRefs{MachineID: id(3), EnvSlug: "prod"},
+			want: "machine:3",
+			why:  "半端に解決した '/prod' は、別 project の environment と読み違える",
+		},
+		{
+			name: "project は引けたが environment が引けない",
+			refs: auditTargetRefs{ProjectSlug: "myapp"},
+			want: "",
+			why:  "'myapp/' は environment を指していない",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := auditTarget(tt.refs); got != tt.want {
+				t.Errorf("auditTarget = %q, want %q (%s)", got, tt.want, tt.why)
+			}
+		})
 	}
 }
 

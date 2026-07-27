@@ -149,6 +149,10 @@ type AuditEntry struct {
 
 // actorUser / actorMachine は actor 文字列を組み立てる。
 // 形式は schema.sql のコメントに合わせる('user:1' | 'machine:3' | 'anonymous')。
+//
+// **監査ログ画面が対象列を表示するときも同じ形式を使う**(store.go の
+// auditTarget)。actor と対象で `user:1` の書き方が食い違うと、同じ人物の
+// 行を目で突き合わせられない。
 func actorUser(id int64) string    { return fmt.Sprintf("user:%d", id) }
 func actorMachine(id int64) string { return fmt.Sprintf("machine:%d", id) }
 

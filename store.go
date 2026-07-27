@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -858,6 +859,10 @@ func ListUsers(ctx context.Context, db *sql.DB) (_ []UserRow, err error) {
 }
 
 // AuditRow は監査ログ画面の 1 行である。
+//
+// **Actor / Target は表示用に解決済みの文字列である。** 監査ログに記録するのは
+// immutable な ID(`user:1` / `machine:3`)であって名前ではない(ルール 24)。
+// 名前は user / machine の**現在の値**を JOIN で引いて併記する。
 type AuditRow struct {
 	At         time.Time
 	Actor      string
@@ -868,14 +873,39 @@ type AuditRow struct {
 	Detail     string
 }
 
+// listAuditLogsSQL は監査行に、主体・対象の現在の名前を左外部結合する。
+//
+// audit_logs は FK を持たない(ルール 57)ので、参照先が引けないことは正常で
+// ある。**削除された project / environment も表示できなければならない**ため、
+// ここでは `deleted_at IS NULL` で絞らない(ルール 58 は secret の取得経路の
+// 話であり、監査は「その時点で何が起きたか」の記録である)。
+//
+// 結合先が 4 つあるのは、対象が machine / user / environment のどれになるかが
+// action で変わるためである。actor 側は user と machine の両方が同時に立つこと
+// はない(AuditEntry.validate が拒否する)。
+// 列は「行そのもの」「actor」「対象」の順に並べる。対象の列は
+// auditTargetRefs のフィールド順と一致させ、そのまま Scan する。
+const listAuditLogsSQL = `
+	SELECT a.at, a.action, a.result, COALESCE(a.remote_addr, ''), COALESCE(a.detail, ''),
+	       a.actor, COALESCE(au.username, ''), COALESCE(am.name, ''),
+	       COALESCE(a.target, ''),
+	       a.target_user_id, COALESCE(tu.username, ''),
+	       a.target_machine_id, COALESCE(tm.name, ''),
+	       COALESCE(tp.slug, ''), COALESCE(te.slug, '')
+	FROM audit_logs a
+	LEFT JOIN users        au ON au.id = a.actor_user_id
+	LEFT JOIN machines     am ON am.id = a.actor_machine_id
+	LEFT JOIN users        tu ON tu.id = a.target_user_id
+	LEFT JOIN machines     tm ON tm.id = a.target_machine_id
+	LEFT JOIN environments te ON te.id = a.target_environment_id
+	LEFT JOIN projects     tp ON tp.id = te.project_id
+	ORDER BY a.at DESC, a.id DESC LIMIT ?`
+
 // ListAuditLogs は監査ログを新しい順に返す。
 //
 // **削除機能は実装しない**(AGENTS.md ルール 28)。閲覧のみ。
 func ListAuditLogs(ctx context.Context, db *sql.DB, limit int) (_ []AuditRow, err error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT at, actor, action, COALESCE(target, ''), result,
-		       COALESCE(remote_addr, ''), COALESCE(detail, '')
-		FROM audit_logs ORDER BY at DESC, id DESC LIMIT ?`, limit)
+	rows, err := db.QueryContext(ctx, listAuditLogsSQL, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list audit logs: %w", err)
 	}
@@ -888,14 +918,77 @@ func ListAuditLogs(ctx context.Context, db *sql.DB, limit int) (_ []AuditRow, er
 	var out []AuditRow
 	for rows.Next() {
 		var (
-			a  AuditRow
-			at int64
+			a                               AuditRow
+			at                              int64
+			actorUserName, actorMachineName string
+			target                          auditTargetRefs
 		)
-		if err := rows.Scan(&at, &a.Actor, &a.Action, &a.Target, &a.Result, &a.RemoteAddr, &a.Detail); err != nil {
+		if err := rows.Scan(&at, &a.Action, &a.Result, &a.RemoteAddr, &a.Detail,
+			&a.Actor, &actorUserName, &actorMachineName,
+			&target.Stored, &target.UserID, &target.UserName,
+			&target.MachineID, &target.MachineName,
+			&target.ProjectSlug, &target.EnvSlug); err != nil {
 			return nil, fmt.Errorf("scan audit row: %w", err)
 		}
 		a.At = time.Unix(at, 0).UTC()
+		// actor は user と machine のどちらか一方しか立たない(validate 済み)。
+		switch {
+		case actorUserName != "":
+			a.Actor = auditSubject(a.Actor, actorUserName)
+		case actorMachineName != "":
+			a.Actor = auditSubject(a.Actor, actorMachineName)
+		}
+		a.Target = auditTarget(target)
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// auditSubject は監査行の主体 / 対象を 'name (user:1)' の形にする。
+//
+// **名前だけにしない。** machines.name に UNIQUE 制約は無いので名前は一意では
+// なく、名前は後から変えられるが監査の追跡は immutable ID で行う(ルール 24)。
+// 名前が引けないとき(#7 より前に作られた空名の machine 等)は識別子だけを返す。
+func auditSubject(ident, name string) string {
+	if name == "" {
+		return ident
+	}
+	return name + " (" + ident + ")"
+}
+
+// auditTargetRefs は監査行の対象を指す列をまとめたものである。
+type auditTargetRefs struct {
+	Stored      string // target 列(記録時点の表示文字列)
+	UserID      sql.NullInt64
+	UserName    string
+	MachineID   sql.NullInt64
+	MachineName string
+	ProjectSlug string
+	EnvSlug     string
+}
+
+// auditTarget は対象列の表示文字列を組み立てる。
+//
+// machine.* / user.* は target 列を持たず ID しか記録しないため、ここで解決
+// しないと画面上は空欄になる。grant.* は「どの machine に、どの environment を」
+// で 1 つの対象なので ' → ' で繋ぐ。
+func auditTarget(t auditTargetRefs) string {
+	var parts []string
+	if t.MachineID.Valid {
+		parts = append(parts, auditSubject(actorMachine(t.MachineID.Int64), t.MachineName))
+	}
+	if t.UserID.Valid {
+		parts = append(parts, auditSubject(actorUser(t.UserID.Int64), t.UserName))
+	}
+	switch {
+	case t.Stored != "":
+		// **記録時点の文字列を優先する。** item の key のように、ID からは
+		// 引き直せない情報が入っている(item は論理削除しても行が残るが、
+		// target 列は「その時どう見えていたか」を保つ)。
+		parts = append(parts, t.Stored)
+	case t.ProjectSlug != "" && t.EnvSlug != "":
+		// grant.delete は target 列を持たず environment_id だけを記録する。
+		parts = append(parts, t.ProjectSlug+"/"+t.EnvSlug)
+	}
+	return strings.Join(parts, " → ")
 }

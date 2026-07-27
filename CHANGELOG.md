@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The audit log view resolves actors and targets to names.** Rows are still
+  recorded with immutable IDs only, so the view now joins the current
+  `users` / `machines` names and renders them as `alice (user:1)`. The bare
+  identifier stays visible because names are neither unique nor immutable.
+  Targets are resolved the same way: `machine.*` / `user.*` / `grant.delete`
+  record only IDs, so those rows previously showed an empty 対象 column.
 - **Web UI terminology.** The machine entity is now labelled 「サーバー」 (was
   「アプリ」, which operators found ambiguous) and a grant is labelled
   「アクセス権」 throughout the Web UI. The `machine` / `grant` terms are

@@ -586,6 +586,24 @@ slug / key は再利用可能(THREAT_MODEL §11.2)なので、`target` 文字列
 - **`audit_logs` は FK を持たない**(参照先が論理削除されても記録は残るべきであり、
   また監査ログの INSERT が FK 検査で失敗するのは避けたい)
 
+**名前は記録せず、表示時に解決する:**
+
+行に入るのは `user:1` / `machine:3` だけなので、そのまま並べても誰の操作か
+読めない。監査ログ画面(`GET /ui/audit`)は `actor_user_id` /
+`actor_machine_id` / `target_user_id` / `target_machine_id` /
+`target_environment_id` を `users` / `machines` / `environments` /
+`projects` に左外部結合し、**現在の**名前を `alice (user:1)` の形で併記する。
+
+- **名前を記録側に持たせない。** 記録時の名前を保存すると、同じ主体の行が
+  改名の前後で別物に見える。追跡は immutable ID で行い、名前は「今どれか」を
+  示す補助にとどめる
+- **生の識別子を残す。** `machines.name` に UNIQUE 制約は無く、名前は変更も
+  できる。名前だけの表示は同名の machine を区別できない
+- **名前が引けなくても行は落とさない**(左外部結合)。空名の machine や、
+  論理削除された project / environment でも識別子は必ず表示する。
+  **ルール 58(祖先の `deleted_at` 検査)は secret の取得経路の話であり、
+  監査の表示には適用しない。** 削除済みの対象こそ記録に残す意味がある
+
 ### 5.3 secret 値の型
 
 | 側 | 型 |

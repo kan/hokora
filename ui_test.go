@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -702,9 +703,46 @@ func TestUIAuditPage(t *testing.T) {
 	if !strings.Contains(body, string(ActionSecretWrite)) {
 		t.Error("the audit page does not list the write")
 	}
+	// **actor は名前と ID の両方で読める**(#11)。ID だけでは誰の操作か
+	// 分からず、名前だけでは重複・改名を追えない。
+	if want := fmt.Sprintf("%s (user:%d)", testUsername, f.userID); !strings.Contains(body, want) {
+		t.Errorf("the audit page does not show the actor as %q", want)
+	}
 	// **監査ログに平文は入らない**(THREAT_MODEL §10.6)。
 	if strings.Contains(body, testSecretValue) {
 		t.Error("the audit page contains a secret value")
+	}
+}
+
+// **解決した名前は、監査画面で初めて他人の画面に出る文字列である。**
+//
+// machine 名は制御文字以外を許す(ValidateMachineName)ので、`<` や `&` を
+// 含む名前が監査ログの対象列に載る。ここが素通しなら、名前を付けられる admin が
+// 他の admin のブラウザでスクリプトを動かせる。**エスケープは html/template
+// 任せだが、任せていること自体を確かめる**(ルール 40: template.HTML を使わない)。
+func TestUIAuditPageEscapesResolvedNames(t *testing.T) {
+	t.Parallel()
+
+	f := newUIFixture(t)
+	f.unseal(t)
+
+	const name = `<script>alert("x")</script> & 請求バッチ`
+	machineID, _, err := CreateMachine(t.Context(), f.store.DB(), "app-x", name, f.auditCtx())
+	if err != nil {
+		t.Fatalf("CreateMachine: %v", err)
+	}
+
+	body := f.get(t, "/ui/audit").Body.String()
+	if strings.Contains(body, "<script>alert") {
+		t.Error("the machine name is rendered unescaped")
+	}
+	// 日本語はそのまま通る(エスケープの対象ではない)。
+	if want := `&lt;script&gt;alert(&#34;x&#34;)&lt;/script&gt; &amp; 請求バッチ`; !strings.Contains(body, want) {
+		t.Errorf("the audit page does not show the escaped name %q", want)
+	}
+	// 名前が読めても識別子は消えない。
+	if want := fmt.Sprintf("(machine:%d)", machineID); !strings.Contains(body, want) {
+		t.Errorf("the audit page does not show %q next to the name", want)
 	}
 }
 
