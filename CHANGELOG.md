@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The declared toolchain is now `go1.26.6`** (was `go1.26.5`). Go 1.26.6 fixes
+  six standard-library vulnerabilities that hokora's own code reaches —
+  GO-2026-6218 (`net/url`), GO-2026-6091 (`html/template`), GO-2026-6090
+  (`crypto/tls`), GO-2026-6089 and GO-2026-5026 (`net/http`), and GO-2026-5972
+  (`encoding/asn1`). The scheduled `vuln` workflow reported them on 2026-08-17
+  without anyone changing the repository, which is what that schedule exists
+  for. CI installs the version named by the `toolchain` line, so the declaration
+  is what decides which compiler builds and scans the release.
+
 ## [0.4.0] - 2026-08-03
 
 ### Added

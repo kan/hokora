@@ -10,7 +10,7 @@ module github.com/kan/hokora/tools
 
 go 1.26
 
-toolchain go1.26.5
+toolchain go1.26.6
 
 tool (
 	github.com/golangci/golangci-lint/v2/cmd/golangci-lint
