@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for. CI installs the version named by the `toolchain` line, so the declaration
   is what decides which compiler builds and scans the release.
 
+### Changed
+
+- **`modernc.org/sqlite` 1.54.0 → 1.56.0** (with `modernc.org/libc` and
+  `github.com/mattn/go-isatty`). No hokora code changes; the DSN and PRAGMA
+  handling is unaffected.
+
 ## [0.4.0] - 2026-08-03
 
 ### Added
