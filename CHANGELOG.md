@@ -25,8 +25,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Building the server from source now needs Go 1.27; **the SDK module still
   declares `go 1.24`**, so applications importing `sdk` are unaffected.
 
+### Upgrade notes
+
+- **This release changes the database schema (schema v2). Run
+  `hokora init --migrate-only` before starting the new binary.** `hokora serve`
+  refuses a database whose schema version does not match (`database schema
+  version is 1, want 2`). On an existing database `init` applies only the
+  pending migration and prints no master key and no password. The new
+  `--migrate-only` flag makes it fail instead of creating a fresh database when
+  the path is wrong. Take a backup with the old binary first — the new binary
+  cannot back up an unmigrated database, and once migrated, the database cannot
+  be opened by an older binary. The full procedure is in `docs/OPERATIONS.md`
+  §1.3.
+
 ### Changed
 
+- **Audit rows written by one bulk fetch are now marked as one batch**
+  (`audit_logs.batch_id`, #22). A bulk fetch still writes one row per key; the
+  mark only lets the audit screen show the call as a single line. Rows written
+  before the upgrade are left exactly as they are — the audit log stays
+  append-only, and guessing which old rows belonged to one call is not
+  recorded as fact — so they keep appearing one per key. The migration also
+  adds an index for filtering by environment.
 - **Web UI terminology: the machine entity is now labelled 「マシン」** (was
   「サーバー」, and 「アプリ」 before 0.4.0), matching the internal name
   `machine` (#24). 「サーバー」 in the Web UI now refers only to hokora itself

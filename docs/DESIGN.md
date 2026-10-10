@@ -114,8 +114,29 @@ db, err := sql.Open("sqlite", dsn)
 
 #### migrate の方式
 
-**`PRAGMA user_version` を使う。** MVP は単一スキーマなので、
+**`PRAGMA user_version` を使う。** 移行は直線的なので、
 `schema_version` テーブルを作るまでもない。
+
+- **移行の SQL を順に並べ、新規の DB も既存の DB も同じ手順を先頭から踏む**
+  (`migrate.go` の `migrations`)。`schema.sql` は v1、以降は
+  `migrations/NNNN_*.sql`。「新規用の完成形」と「移行用の差分」を別々に持つと、
+  片方だけ直して両者がずれる。新規と移行後で `audit_logs` の形が一致することを
+  テストで固定している
+- **適用済みの SQL は書き換えない。** 変更は新しいファイルを末尾に足す
+- **未適用の移行は 1 トランザクションで全て適用する。** 途中で失敗したら
+  `user_version` ごと巻き戻る
+- **移行するのは `hokora init` だけである。** `serve` はバージョンが合わない
+  DB を開かない。バイナリを上げたら、起動の前に `hokora init --migrate-only`
+  を実行する(OPERATIONS §1.3)。`--migrate-only` は、ファイルが無ければ DB を
+  新しく作らずに失敗する(パスの打ち間違いで空の DB と新しい MK を作らない)
+- 同時に走った別の `init` が先に移行を終えていたら、失敗ではなく成功として扱う
+  (バージョンをトランザクションの外で読むため、後発は「列が既にある」で落ちる)
+- **バイナリより新しい DB は拒否する**
+
+| version | 内容 |
+|---|---|
+| 1 | 初期スキーマ(`schema.sql`) |
+| 2 | `audit_logs.batch_id`、`idx_audit_batch`、`idx_audit_target_env`(§5.2) |
 
 ### 3.2 なぜ Redis を使わないか
 
@@ -564,14 +585,48 @@ CREATE TABLE audit_logs (
     target_machine_id     INTEGER,      -- immutable ID
     result          TEXT NOT NULL,      -- 'success' | 'failure'
     remote_addr     TEXT,
-    detail          TEXT                -- §5.4 の型付き JSON のみ
+    detail          TEXT,               -- §5.4 の型付き JSON のみ
+    batch_id        INTEGER             -- 同じ呼び出しの行をまとめる印(下記。v2)
 );
 
 CREATE INDEX idx_audit_at ON audit_logs(at DESC);
 CREATE INDEX idx_audit_actor_user ON audit_logs(actor_user_id, at DESC);
 CREATE INDEX idx_audit_actor_machine ON audit_logs(actor_machine_id, at DESC);
 CREATE INDEX idx_audit_target_item ON audit_logs(target_item_id, at DESC);
+CREATE INDEX idx_audit_batch ON audit_logs(batch_id) WHERE batch_id IS NOT NULL;
+CREATE INDEX idx_audit_target_env ON audit_logs(target_environment_id, at DESC)
+    WHERE target_environment_id IS NOT NULL;
 ```
+
+**`batch_id`(bulk fetch の行をまとめる印):**
+
+bulk fetch は key ごとに 1 行を記録する(THREAT_MODEL §10.1)。grant に 30 key
+あれば、クライアントが 1 回動くたびに 30 行増え、監査ログ画面で他の操作が
+押し出される。**記録の粒度は変えず、同じ呼び出しの行を画面でまとめられるように
+`batch_id` を持たせる。**
+
+| `batch_id` | 意味 |
+|---|---|
+| `NULL` | 単独の行、または batch の先頭行(一覧に出るのはこの行) |
+| 先頭行の `id` | 同じ batch の 2 行目以降 |
+
+- **先頭行を `NULL` のままにする。** 一覧は `batch_id IS NULL` だけでグループ
+  単位に並べられ、書き込み側は「先頭行を書き、その `id` を後続の行に書く」
+  だけで済む。先頭行に自分の `id` を持たせる形にすると、INSERT の前に自分の
+  `id` を知る必要が生じ、採番の先読みか行の UPDATE が要る
+- 先頭行が batch かどうかは、自分の `id` を `batch_id` に持つ行があるかで分かる
+  (件数は `idx_audit_batch` で引く)
+- **`batch_id IS NULL` で絞ってよいのは、batch の全行に共通する条件で絞り込む
+  ときだけである**(時刻、実行者、操作、結果、environment)。key(item)のように
+  行ごとに違う条件で絞るときに `batch_id IS NULL` を付けると、先頭行でない key の
+  読み取りが一覧から消える。その場合は batch を無視して全行を対象にする
+- 1 件だけの呼び出し(単一取得)は、先頭行しか無いので単独の行と同じになる
+- **batch は 1 トランザクションで書く。** 半分だけ書かれた batch を残さない
+- **v1 の既存行は埋め戻さない。** v1 には「同じ呼び出し」を表す列が無く、
+  同じ秒・同じ machine の行をまとめるのは推測になる。推測を、事実の記録と
+  見分けられない形で監査ログに書かない。埋め戻しには `audit_logs` への UPDATE も
+  要るが、**監査ログは追記専用である**(THREAT_MODEL §10.7)。v1 の行は画面で
+  1 行ずつ表示される
 
 **監査ログに immutable ID を持つ理由:**
 

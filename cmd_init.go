@@ -39,8 +39,19 @@ func cmdInit(ctx context.Context, args []string) (err error) {
 	// エラーを出すのと合わせて同じ文言が二度出る。
 	flags.SetOutput(io.Discard)
 	dbPath := flags.String("db", DefaultDBPath, "path to the SQLite database file")
+	migrateOnly := flags.Bool("migrate-only", false, "only migrate an existing database; fail if the file does not exist")
 	if handled, err := parseFlags(flags, args); handled {
 		return err
+	}
+
+	// **更新時の移行では、DB を新しく作らない。** --db を打ち間違えると、init は
+	// その場所に空の DB を作り、新しい MK と初期パスワードを出力して成功する
+	// (本物の DB は古いまま残り、不要な MK が端末に残る)。移行のつもりで
+	// 実行したなら、ファイルが無いことはエラーである。
+	if *migrateOnly {
+		if _, err := os.Stat(*dbPath); err != nil {
+			return fmt.Errorf("--migrate-only: no database to migrate at %s: %w", *dbPath, err)
+		}
 	}
 
 	if err := ensureDBFile(*dbPath); err != nil {

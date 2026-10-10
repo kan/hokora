@@ -417,31 +417,31 @@ func (a *machineAPI) decryptAll(secrets []EncryptedSecret) (map[string]string, e
 	return values, nil
 }
 
-// recordSecretReads は読み取りを key ごとに 1 行、1 トランザクションで記録する。
+// recordSecretReads は読み取りを key ごとに 1 行、1 トランザクションで記録する
+// (AGENTS.md ルール 23)。
 //
 // **fail closed。** ここが失敗したら secret を返さない(THREAT_MODEL §10.4)。
 // result = success は「認可を通過し、復号に成功し、レスポンスの送信を開始した」
 // を意味する(§10.5)。
 func (a *machineAPI) recordSecretReads(ctx context.Context, req authorizedRequest, secrets []EncryptedSecret) error {
-	return withTx(ctx, a.db, func(tx *sql.Tx) error {
-		ac := machineAudit(req.machineID, req.remoteAddr, req.now)
-		for _, s := range secrets {
-			// target は DB から読んだ値だけで組み立てる。リクエストの生の
-			// 文字列は入れない(AGENTS.md ルール 25)。
-			target := req.env.ProjectSlug + "/" + req.env.EnvSlug + "/" + s.Key
-			version := s.Version
+	ac := machineAudit(req.machineID, req.remoteAddr, req.now)
+	entries := make([]AuditEntry, 0, len(secrets))
+	for _, s := range secrets {
+		// target は DB から読んだ値だけで組み立てる。リクエストの生の
+		// 文字列は入れない(AGENTS.md ルール 25)。
+		target := req.env.ProjectSlug + "/" + req.env.EnvSlug + "/" + s.Key
+		version := s.Version
 
-			entry := ac.entry(ActionSecretRead, ResultSuccess, &AuditDetail{Version: &version})
-			entry.Target = &target
-			entry.TargetProjectID = &req.env.ProjectID
-			entry.TargetEnvironmentID = &req.env.EnvironmentID
-			entry.TargetItemID = &s.ItemID
-			entry.TargetMachineID = &req.machineID
-			if err := RecordAudit(ctx, tx, entry); err != nil {
-				return err
-			}
-		}
-		return nil
+		entry := ac.entry(ActionSecretRead, ResultSuccess, &AuditDetail{Version: &version})
+		entry.Target = &target
+		entry.TargetProjectID = &req.env.ProjectID
+		entry.TargetEnvironmentID = &req.env.EnvironmentID
+		entry.TargetItemID = &s.ItemID
+		entry.TargetMachineID = &req.machineID
+		entries = append(entries, entry)
+	}
+	return withTx(ctx, a.db, func(tx *sql.Tx) error {
+		return RecordAuditBatch(ctx, tx, entries)
 	})
 }
 

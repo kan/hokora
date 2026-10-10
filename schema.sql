@@ -1,4 +1,7 @@
--- hokora schema (DESIGN §5.2)
+-- hokora schema v1 (DESIGN §5.2)
+--
+-- **これは v1 の内容であり、現在の完成形ではない。** 以降の変更は
+-- migrations/NNNN_*.sql に足す(このファイルは書き換えない。migrate.go)。
 --
 -- 方針:
 --   - 外部キーは全て ON DELETE RESTRICT。CASCADE を使わない

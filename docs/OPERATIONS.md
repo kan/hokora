@@ -83,6 +83,44 @@ sudo -u hokora hokora init | op document create --title 'hokora master-key'
 4. Web UI の unseal 画面、または admin socket 経由（§3）で unseal する。
 5. unseal 後、project / environment / item / machine / grant を作成する。
 
+### 1.3 バイナリの更新（スキーマの移行を伴う場合）
+
+**`hokora serve` は、スキーマのバージョンが自分と合わない DB を開かない。**
+移行するのは `hokora init` だけである。スキーマを変えた版（CHANGELOG に
+「schema vN」と書いてある版）へ上げるときは、起動の前に
+`hokora init --migrate-only` を実行する。
+
+```bash
+# 1. 現行のバイナリで、稼働中にバックアップを取る(§9.1)
+ssh vps "sudo -n hokora backup --out /var/lib/hokora/backups/hokora-$(date +%Y%m%d-%H%M%S).db"
+# 2. 止める
+ssh vps 'sudo -n systemctl stop hokora'
+# 3. バイナリを差し替える
+# 4. スキーマを移行する(既存の DB には未適用の移行だけを当てる)
+ssh vps 'sudo -n -u hokora hokora init --migrate-only --db /var/lib/hokora/hokora.db'
+# 5. 起動して unseal する(§3)
+ssh vps 'sudo -n systemctl start hokora'
+```
+
+- **更新のときは必ず `--migrate-only` を付ける。** 付けないと、`--db` を打ち
+  間違えたときに `init` はその場所へ**空の DB を新しく作り、新しい MK と初期
+  パスワードを出力して成功する**（本物の DB は古いまま残る）。`--migrate-only`
+  は、ファイルが無ければ何も作らずにエラーで終わる。
+- **既存の DB への `init` は、MK も初期パスワードも出力しない。** keyring と
+  admin が既にあれば触らない。出力されるのは `initialized <path>` だけである。
+- **手順 1 のバックアップは、バイナリを差し替える前に取る。** `hokora backup`
+  もスキーマのバージョンが合わない DB を開かないので、新しいバイナリでは
+  移行前の DB のバックアップを取れない。
+- **移行は 1 トランザクションで行う。** 失敗したら DB は元のバージョンのまま
+  残る。そのときは古いバイナリに戻せば起動できる。
+- **移行後の DB は、古いバイナリでは開けない**（バイナリより新しい DB を拒否
+  する）。戻すときは手順 1 のバックアップから復元する（§9.2）。
+- **移行にかかる時間は監査ログの行数に比例する**（v2 は `audit_logs` に
+  インデックスを 2 本足す。既存の行の内容は書き換えない）。止めている間は
+  Machine API が応答しない。
+- 手順 4 を飛ばして起動すると、`database schema version is N, want M: run
+  `hokora init`` で終了する。
+
 ---
 
 ## 2. systemd unit
@@ -503,6 +541,11 @@ sudo -n hokora status                       # state=unsealed になることを�
 
 - **定期的に復元テストを回す。** バックアップ手順の劣化は、実際に復元するまで
   検出できない。
+- **バックアップのスキーマは、それを取ったバイナリの版に結び付いている。**
+  古い版で取ったバックアップを新しいバイナリで起動すると
+  `database schema version is N, want M` で終了する。`systemctl start` の前に
+  `hokora init --migrate-only` で移行する（§1.3）。逆に、新しい版で取った
+  バックアップは古いバイナリでは開けない。
 
 ### 9.3 復元時の注意（R16 — 状態の巻き戻り）
 
@@ -593,6 +636,7 @@ ssh vps 'hokora gen-key' | op document create --title 'hokora master-key-new'
 | 症状 | 見るところ |
 |------|-----------|
 | 起動直後に終了し `mlockall failed (LimitMEMLOCK=infinity is required)` | unit の `LimitMEMLOCK=infinity`（§2）。手元検証は root か `ulimit -l unlimited` が要る |
+| 更新後に起動せず `database schema version is N, want M` | スキーマを変えた版に上げた。`hokora init --migrate-only` で移行する（§1.3） |
 | unseal したのに `sudo` がパスワードを聞いて MK が消費される | `sudo -n` と NOPASSWD sudoers（§3.1）。プロンプトが stdin を食っている |
 | アプリが 401 を受ける | credential 再発行・machine 無効化でトークンが消えていないか。credential 解決順序（§8.1）で意図した値が読めているか |
 | アプリが 403 を受ける | grant の有無、project / environment が論理削除されていないか（削除は grant なしと同じ 403） |

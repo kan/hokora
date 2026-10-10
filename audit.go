@@ -257,8 +257,8 @@ const insertAuditSQL = `
 INSERT INTO audit_logs (
     at, actor, actor_user_id, actor_machine_id, action, target,
     target_project_id, target_environment_id, target_item_id,
-    target_user_id, target_machine_id, result, remote_addr, detail
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    target_user_id, target_machine_id, result, remote_addr, detail, batch_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // RecordAudit は監査ログを 1 件書く。
 //
@@ -266,21 +266,61 @@ INSERT INTO audit_logs (
 // master.rotate)。呼び出し側は本体の処理と同じトランザクションを渡し、
 // この関数がエラーを返したら commit しないこと(THREAT_MODEL §10.4)。
 func RecordAudit(ctx context.Context, ex execer, e AuditEntry) error {
+	_, err := insertAudit(ctx, ex, e, nil)
+	return err
+}
+
+// insertAudit は検証してから 1 行を書き、その id を返す。
+//
+// batchID は batch の 2 行目以降だけが持つ(先頭行の id)。単独の行と batch の
+// 先頭行は nil を渡す。
+func insertAudit(ctx context.Context, ex execer, e AuditEntry, batchID *int64) (int64, error) {
 	if err := e.validate(); err != nil {
-		return err
+		return 0, err
 	}
 	detail, err := e.marshalDetail()
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	_, err = ex.ExecContext(ctx, insertAuditSQL,
+	res, err := ex.ExecContext(ctx, insertAuditSQL,
 		e.At.Unix(), e.Actor, e.ActorUserID, e.ActorMachineID, string(e.Action), e.Target,
 		e.TargetProjectID, e.TargetEnvironmentID, e.TargetItemID,
-		e.TargetUserID, e.TargetMachineID, string(e.Result), e.RemoteAddr, detail,
+		e.TargetUserID, e.TargetMachineID, string(e.Result), e.RemoteAddr, detail, batchID,
 	)
 	if err != nil {
-		return fmt.Errorf("insert audit log: %w", err)
+		return 0, fmt.Errorf("insert audit log: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("insert audit log: %w", err)
+	}
+	return id, nil
+}
+
+// RecordAuditBatch は、1 回の呼び出しで生じた複数の監査行を 1 つの batch として
+// 書く(bulk fetch の「key ごとに 1 行」。AGENTS.md ルール 23)。
+//
+// **記録の粒度は変えない。** 行は entries の数だけ書く。batch_id は、監査ログ
+// 画面が同じ呼び出しの行をまとめて表示するための印である(migrations/0002)。
+//
+//   - 先頭行は batch_id を持たない(NULL)。一覧に出るのはこの行である
+//   - 2 行目以降は batch_id = 先頭行の id
+//   - entries が 1 件なら、先頭行だけなので単独の行と同じになる
+//
+// **fail closed の経路で使う。** 途中で失敗したら、呼び出し側のトランザクション
+// ごと巻き戻すこと。*sql.Tx を要求するのは、batch が半分だけ書かれた状態を
+// 残さないためである。
+func RecordAuditBatch(ctx context.Context, tx *sql.Tx, entries []AuditEntry) error {
+	var headID *int64
+	for _, e := range entries {
+		id, err := insertAudit(ctx, tx, e, headID)
+		if err != nil {
+			return err
+		}
+		if headID == nil {
+			headID = &id
+		}
 	}
 	return nil
 }

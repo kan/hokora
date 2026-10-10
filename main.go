@@ -16,7 +16,8 @@ Usage:
   hokora <command> [flags]
 
 Server commands:
-  init            initialize the database
+  init            initialize the database, or migrate its schema after an upgrade
+                  (--migrate-only refuses to create a new database)
   gen-key         generate a new master key and print it (does not touch the database)
   serve           run the server (starts sealed)
   unseal --stdin  unseal the server (master key is read from stdin)
