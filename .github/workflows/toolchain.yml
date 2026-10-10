@@ -1,0 +1,32 @@
+name: toolchain
+
+# go.mod の宣言が最新の安定版 Go に追随しているかを確かめる
+# (AGENTS.md「root と tools は Go の最新に追随する」)。
+#
+# vuln.yml の govulncheck は「宣言した版に到達可能な脆弱性があるか」を見るので、
+# 宣言が古いだけでは落ちない(脆弱性が公開されて初めて落ちる)。Dependabot も
+# toolchain 行を上げない。**「新しい Go が出たのに上げていない」こと自体を
+# 検出する検査は、ここにしかない。**
+#
+# vuln.yml と分けてあるのは、通知を混ぜないためである。新しい minor が出た
+# 直後は、対応する golangci-lint が出るまで追随できずに赤いままになりうる。
+# 同じワークフローに置くと、その間 govulncheck の失敗が埋もれる。
+#
+# 新しい Go のリリースは変更と無関係に起きるので、push / PR では走らせない
+# (無関係な PR を赤くしない)。
+on:
+  schedule:
+    - cron: '47 3 * * 1' # 毎週月曜 03:47 UTC (12:47 JST)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  toolchain-latest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # curl と sed だけで足りるので Go は入れない。
+      - name: toolchain-latest
+        run: make toolchain-latest

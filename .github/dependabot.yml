@@ -9,17 +9,35 @@ updates:
     schedule:
       interval: weekly
 
-  # go.mod には本体の依存に加えて lint / vuln のツール依存も入る。
+  # サーバー本体の依存(root の go.mod)。
   - package-ecosystem: gomod
     directory: /
     schedule:
       interval: weekly
+
+  # 開発ツール(tools/go.mod)。**directory は module ごとに書く。** `/` の
+  # 指定は tools/ の別 module を見ないため、分離した時点から golangci-lint と
+  # govulncheck の更新が来なくなり、古い golangci-lint が新しい Go の
+  # export data を読めず lint が落ちるまで気付けなかった。
+  # sdk/ は依存ゼロなので対象に入れない。
+  - package-ecosystem: gomod
+    directory: /tools
+    schedule:
+      interval: weekly
+    # tools/go.mod の require は、tool ディレクティブで使うツール本体を含めて
+    # 全て `// indirect` である。Dependabot の既定は direct だけを更新するので、
+    # 明示しないと directory を足しても PR が来ない。ツール本体だけを対象にし、
+    # 推移的依存はツールの更新に付いてくる分に任せる。
+    allow:
+      - dependency-name: github.com/golangci/golangci-lint/v2
+        dependency-type: all
+      - dependency-name: golang.org/x/vuln
+        dependency-type: all
     groups:
-      # ツール依存(golangci-lint / govulncheck とその推移的依存)は
-      # バイナリに入らないため、まとめて 1 つの PR にする。
+      # ツールとその推移的依存はバイナリに入らないため、まとめて 1 つの PR にする。
       dev-tools:
         patterns:
-          - github.com/golangci/*
-          - golang.org/x/vuln
-          - honnef.co/go/*
-          - mvdan.cc/*
+          - "*"
+
+# Go 本体(go.mod の toolchain 行)は Dependabot が上げない。
+# toolchain.yml(make toolchain-latest)が定期に検査する。

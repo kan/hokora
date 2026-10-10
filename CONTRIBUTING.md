@@ -19,7 +19,7 @@ project, so a few things are stricter than usual.
 
 ## Development
 
-Requirements: Go 1.26.5+ (the version in `go.mod` is authoritative). Linux for
+Requirements: Go 1.27.2+ (the version in `go.mod` is authoritative). Linux for
 running the server (`mlockall`); tests run anywhere.
 
 ```bash

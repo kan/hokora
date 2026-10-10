@@ -149,7 +149,7 @@ Release binaries (recommended):
 #                                hokora-client_<version>_linux_<arch>.tar.gz
 ```
 
-From source (Go 1.26+; `go.mod` declares `toolchain go1.26.5`, which
+From source (Go 1.27+; `go.mod` declares `toolchain go1.27.2`, which
 `GOTOOLCHAIN=auto` fetches automatically):
 
 ```

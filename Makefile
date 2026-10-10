@@ -15,14 +15,14 @@ SUBMODULES := tools/go.mod sdk/go.mod
 MODULES := . sdk
 
 .PHONY: all build build-client test vet fmt fmt-check lint vuln tidy clean \
-        toolchain-check
+        toolchain-check toolchain-latest
 
 all: toolchain-check fmt-check vet lint test build
 
 # go.mod の `toolchain` 行と、実際に走っている処理系の版が一致することを
-# 確かめる。`go` 行は利用側への最低要求(1.26)であって patch を含まないため、
-# **GOTOOLCHAIN=local かつ go1.26.0 の環境では宣言を満たしてしまい、既知の
-# 脆弱性を持つ処理系でビルド・スキャンが通ってしまう。** 宣言(設定した)と
+# 確かめる。`go` 行は minor までの宣言であって patch を含まないため、
+# **GOTOOLCHAIN=local かつその minor の古い patch(x.y.0 等)の環境では宣言を
+# 満たしてしまい、既知の脆弱性を持つ処理系でビルド・スキャンが通ってしまう。** 宣言(設定した)と
 # 実行(効いている)を突き合わせてそこを塞ぐ。CI も同じターゲットを呼ぶ。
 toolchain-check:
 	@want="$$(sed -n 's/^toolchain go//p' go.mod)"; \
@@ -35,9 +35,9 @@ toolchain-check:
 		echo "toolchain mismatch: go.mod は go$$want を宣言しているが go$$got で走っている"; \
 		echo "GOTOOLCHAIN=auto (既定) で実行するか、go$$want を入れること"; exit 1; \
 	fi; \
-	rootgo="$$(sed -n 's/^go //p' go.mod)"; \
+	rootgo="$$(sed -n 's/^go //p' go.mod | cut -d. -f1,2)"; \
 	for f in $(SUBMODULES); do \
-		g="$$(sed -n 's/^go //p' $$f)"; t="$$(sed -n 's/^toolchain go//p' $$f)"; \
+		g="$$(sed -n 's/^go //p' $$f | cut -d. -f1,2)"; t="$$(sed -n 's/^toolchain go//p' $$f)"; \
 		if [ "$$t" != "$$want" ]; then \
 			echo "$$f の toolchain が go.mod とずれている (go$$t / root は go$$want)"; \
 			exit 1; \
@@ -45,6 +45,42 @@ toolchain-check:
 		if [ "$$(printf '%s\n%s\n' "$$g" "$$rootgo" | sort -V | head -1)" != "$$g" ]; then \
 			echo "$$f の go 行 ($$g) が root ($$rootgo) より新しい"; \
 			echo "go 行は利用側への最低要求である。root を超えて上げない"; exit 1; \
+		fi; \
+	done
+# go 行の比較は minor までで行う。依存が `go 1.27.0` を要求すると go コマンドが
+# go 行を patch 付きへ書き換えるが、`sort -V` は `1.27` < `1.27.0` と並べるため、
+# そのまま比べると tools だけ書き換わった時点で「root より新しい」と誤判定する。
+
+# go.mod の宣言が、公開されている最新の安定版 Go に追随していることを確かめる
+# (AGENTS.md「root と tools は Go の最新に追随する」)。
+#
+# **toolchain-check は「宣言と実行の一致」しか見ない。宣言そのものが古いことは
+# 検出しない。** Dependabot も toolchain 行を上げないため、go1.26.6 のまま
+# 1.26.9 と 1.27 系を見送り、定期の govulncheck が赤くなるまで気付けなかった。
+# 変更起因ではないので `all` には入れず、toolchain.yml の定期実行から呼ぶ。
+#
+# 検査するのは toolchain 行(全 module で共通。toolchain-check が揃える)と、
+# root / tools の go 行の minor。sdk の go 行は利用側への最低要求なので見ない。
+# 取得に失敗したら通さない(検査できていないのに緑にしない)。
+LATEST_GO_MODS := go.mod tools/go.mod
+
+toolchain-latest:
+	@latest="$$(curl -fsSL --retry 3 --retry-all-errors 'https://go.dev/VERSION?m=text' \
+		| sed -n '1s/^go//p')"; \
+	if [ -z "$$latest" ]; then \
+		echo "最新の Go の版を取得できなかった (https://go.dev/VERSION?m=text)"; exit 1; \
+	fi; \
+	want="$$(sed -n 's/^toolchain go//p' go.mod)"; \
+	echo "go.mod toolchain=$$want  latest=$$latest"; \
+	if [ "$$want" != "$$latest" ]; then \
+		echo "toolchain が古い: go.mod は go$$want、最新の安定版は go$$latest"; \
+		echo "全ての go.mod の toolchain 行を上げること (AGENTS.md 技術スタック節)"; exit 1; \
+	fi; \
+	minor="$$(echo "$$latest" | cut -d. -f1,2)"; \
+	for f in $(LATEST_GO_MODS); do \
+		g="$$(sed -n 's/^go //p' $$f | cut -d. -f1,2)"; \
+		if [ "$$g" != "$$minor" ]; then \
+			echo "$$f の go 行 ($$g) が最新の minor ($$minor) とずれている"; exit 1; \
 		fi; \
 	done
 

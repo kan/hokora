@@ -93,6 +93,7 @@
 | SDK の依存を `go list -deps`(パッケージ単位)だけで検査していた。**module graph は誰も見ていなかった**ため、上の 225 件は不変条件をすり抜けていた。冒頭の「部品の単体テストは配線を検証しない」と同型 | **測る単位が対象と揃っているか確かめる。** 利用側が受け取るのは module であって、パッケージ依存グラフではない |
 | 別 module 化の作業中、gopls の警告を消すため `go.work` を置いたら、**`go list -m all` が workspace 全体を返し、追加したばかりの module graph テストが誤った対象を測って落ちた。** ビルドも全 module の require を MVS でまとめた build list を使う | **開発の便宜で入れた設定が、検査と成果物の意味を変えることがある。** 「エディタのため」に入れるものでも、go コマンドの解決規則を変えるなら影響を追う |
 | 外部レビュー(Codex)の「`ListEnvironments` が親 project の `deleted_at` を再検査していない(ルール 58)」という指摘どおりに直したら、**既存テストが逆の挙動(祖先検査は解決側の責務、行は残す)を意図として固定していた**ため落ちた | **外部レビューの指摘も鵜呑みにしない。** 直す前に、既存テストやコメントが逆を主張していないか見る。主張していたらまずその設計意図を確認し、指摘が既存の意図と衝突するなら「偽陽性」として扱う |
+| tools を別 module に分離したとき、`dependabot.yml` は `directory: /` のままにした。**Dependabot は指定した directory の go.mod しか見ないため、`tools/` の更新 PR は一度も来なくなり、** golangci-lint は 2.12.2 で止まった。`toolchain` 行も Dependabot は上げないので go1.26.6 のまま 1.26.9 と 1.27 系を見送り、定期の govulncheck が 12 件で赤くなるまで誰も気付かなかった | **構成を変えたら、その構成を見張っている仕組みの設定も一緒に動かす。** 「更新 PR が来ていない」は「最新である」を意味しない。検知の対象から外れたものは、静かに古くなる |
 
 **この表は増える前提で書かれている。** 同種の誤りを見つけたら追記すること。
 
@@ -314,7 +315,7 @@
 
 | 項目 | 選択 | 備考 |
 |------|------|------|
-| 言語 | Go(`go 1.26` + `toolchain go1.26.5`) | `go.mod` が正。**2 つの行を別の目的で使い分ける**(下記) |
+| 言語 | Go(`go 1.27` + `toolchain go1.27.2`) | `go.mod` が正。**2 つの行を別の目的で使い分ける**(下記) |
 | DB | SQLite | `modernc.org/sqlite`(CGO 不要) |
 | DB アクセス | `database/sql` + 素の SQL | **ORM を使わない** |
 | HTTP | `net/http` + `http.ServeMux` | **Web フレームワークを使わない** |
@@ -326,32 +327,87 @@
 ### `go` ディレクティブと `toolchain` を分けて宣言する
 
 ```
-go 1.26
+go 1.27
 
-toolchain go1.26.5
+toolchain go1.27.2
 ```
 
 - **`go` 行は「利用側に要求する最低言語バージョン」**。Go 1.21 以降、依存
   module の `go` 行は利用側への強制であり、**patch まで書くと
-  (`go 1.26.5`)、`go 1.26` と宣言している利用側の go.mod が
-  `go mod tidy` で `go 1.26.5` に書き換えられ、その先の利用者へ伝播する。**
+  (`go 1.27.2`)、`go 1.27` と宣言している利用側の go.mod が
+  `go mod tidy` で `go 1.27.2` に書き換えられ、その先の利用者へ伝播する。**
   SDK を配る module で patch を宣言しない
 - **`toolchain` 行は「hokora 自身がビルド・検査に使う処理系」**。
   依存 module の `toolchain` は無視される(効くのは main module のみ)ため、
   **利用側のコストはゼロ**。hokora 側は `GOTOOLCHAIN=auto`(既定)で
-  1.26.5 に切り替わり、`GOTOOLCHAIN=local` かつ古い処理系なら
+  1.27.2 に切り替わり、`GOTOOLCHAIN=local` かつ古い処理系なら
   go コマンドがエラーになる(fail closed)
-- **`toolchain` 行を省いてはならない。** `go 1.26` だけにすると、手元に
-  go1.26.0 がある開発者は宣言を満たすため自動アップグレードが起きず、
+- **`toolchain` 行を省いてはならない。** `go 1.27` だけにすると、手元に
+  go1.27.0 がある開発者は宣言を満たすため自動アップグレードが起きず、
   既知の脆弱性を持つ処理系でビルド・スキャンし続ける。上の教訓表
   (「宣言が古いと CI は脆弱な処理系で走り続ける」)が裏返しで再発する
 - `toolchain` があれば **CI(`go-version-file: go.mod`)もその版を入れる**
   (actions/setup-go は toolchain があればそれを優先する)。
   「宣言した版でスキャンされる」性質が保たれ、`vuln.yml` の定期
-  govulncheck が **宣言の陳腐化そのもの**を検出できる
+  govulncheck が **宣言した版に脆弱性が公開されたこと**を検出できる
+  (新しい版が出たこと自体の検出は `toolchain.yml`。下の節)
 - 外部スキャナ(OSV-Scanner 等)は `toolchain` を見ずに `go` 行を stdlib
   版として扱う不具合があり誤警告しうるが、**`go` 行はスキャナの都合ではなく
   「利用側に要求する最低言語バージョン」として決める**
+
+### root と tools は Go の最新に追随する
+
+**root と `tools/` の go.mod は、最新の安定版 Go に追随させる。**
+
+| 行 | root | `tools/` | `sdk/` |
+|---|---|---|---|
+| `toolchain` | 最新の安定版(patch まで) | root と同じ | root と同じ |
+| `go` | 最新の minor(`go 1.27`) | 最新の minor | **追随させない**(1.24 のまま低く保つ) |
+
+- **新しい Go が出たら、patch でも minor でも `toolchain` 行を上げる。**
+  3 つの go.mod を同時に上げる(`make toolchain-check` がずれを弾く)
+- **新しい minor が出たら、root と `tools/` の `go` 行も上げる。**
+  root は利用側から import されない(利用側が import するのは `sdk/`)ので、
+  `go` 行を上げても利用側への強制にならない
+- **`sdk/` の `go` 行はこの方針の対象外である。** 上げるかどうかは
+  「利用側に要求してよいか」で決める(「module は 3 つある」節)
+- root と `tools/` の `go` 行は、依存が要求すれば `go 1.27.0` のように
+  patch 付きへ書き換わる(依存の `go` 行は強制なので避けられない)。
+  **これは root と `tools/` に限って許容する。** `sdk/` の `go` 行に patch を
+  書かない規則は変わらない。`make toolchain-check` と `make toolchain-latest` は
+  `go` 行を minor までで比べる
+- **minor を上げるときは `tools/` の依存も一緒に上げる。** 古い
+  golangci-lint は新しい Go の export data を読めず、lint が typecheck で
+  落ちる(go1.27 と golangci-lint 2.12.2 で発生した)
+- 上げたら `make all` と `make vuln` を通し、版を書いている文書も直す
+  (`CHANGELOG.md`、`README.md`、`CONTRIBUTING.md`、この節と「技術スタック」の表)
+
+**追随の漏れは検査で検出する。規則を書いただけでは守られない。**
+
+| 対象 | 検出する仕組み |
+|---|---|
+| `toolchain` 行、root / `tools/` の `go` 行 | `make toolchain-latest`(go.dev の最新の安定版と突き合わせる)。`.github/workflows/toolchain.yml` が週次と手動実行で回す |
+| root の依存 | Dependabot(`directory: /`) |
+| `tools/` のツール本体(golangci-lint / govulncheck) | Dependabot(`directory: /tools`、`allow` で `dependency-type: all`) |
+
+- **Dependabot は `toolchain` 行を上げない。** Go 本体の更新を Dependabot の
+  PR として待たない
+- `make toolchain-latest` は変更起因の検査ではないので `make all` に含めない。
+  push / PR でも走らせない(新しい Go のリリースで無関係な PR が赤くなるため)
+- **定期の govulncheck は「宣言した版に到達可能な脆弱性が公開された」ことを
+  検出するのであって、「新しい版が出た」ことは検出しない。** 両者を混同しない
+- **go.mod を増やしたら、`dependabot.yml` に `directory` を足す。**
+  Dependabot は指定した directory の go.mod しか見ない
+- **`tools/go.mod` の require は全て `// indirect` である。** Dependabot の既定は
+  direct だけを更新するので、`allow` を外すと `/tools` の PR は来なくなる
+- **新しい minor の直後は、対応する golangci-lint が出るまで追随できない
+  ことがある。** その間 `toolchain.yml` は赤いままでよい(検出が働いている)。
+  検査を緩めて緑にしない。`vuln.yml` と分けてあるのは、この赤で govulncheck の
+  失敗を埋もれさせないためである
+- **検査にも空白がある。** GitHub は 60 日間リポジトリに動きが無いと定期実行の
+  workflow を無効化する。`/tools` の `allow` が効いていることも、次のツールの
+  リリースで PR が来るまで確かめられていない。**「検査を置いた」を
+  「検出できている」と書かない**
 
 **依存の追加は原則禁止。**
 
@@ -430,9 +486,9 @@ sdk のみ」を不変条件として検査する)。**`cmd/<name>/` を増や�
 
 | module | 目的 | go 行(利用側への最低要求) |
 |---|---|---|
-| root(`github.com/kan/hokora`) | サーバー本体・クライアントバイナリ | 1.26 |
+| root(`github.com/kan/hokora`) | サーバー本体・クライアントバイナリ | 1.27(最新の minor に追随) |
 | `sdk/` | アプリに配る Go SDK。**依存ゼロ** | **1.24**(低く保つ) |
-| `tools/` | 開発ツール(lint / vuln)。成果物に入らない | 1.26 |
+| `tools/` | 開発ツール(lint / vuln)。成果物に入らない | 1.27(root と揃える) |
 
 **分離の理由は、利用側の module graph と go 行の強制を切り離すことにある。**
 単一 module だと、SDK しか import していないアプリにも
@@ -535,7 +591,7 @@ M7(リリース準備)
 (品質レビューがソースを直す一方でテスト作成が同じソースを読むため、
 編集が競合する)。
 
-1. **`make all`**(`fmt-check` → `vet` → `lint` → `test` → `build`)を通す。
+1. **`make all`**(`toolchain-check` → `fmt-check` → `vet` → `lint` → `test` → `build`)を通す。
    `.github/workflows/ci.yml` と同じ内容なので、ここで落ちるものは push
    しても落ちる。**依存を足した / 更新したときは `make vuln` も回す**
    (脆弱性検査は `vuln.yml` に分離してあり、`make all` には含まれない)

@@ -17,12 +17,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without anyone changing the repository, which is what that schedule exists
   for. CI installs the version named by the `toolchain` line, so the declaration
   is what decides which compiler builds and scans the release.
+- **The declared toolchain is now `go1.27.2`** (was `go1.26.6`), and the root
+  module's `go` line is now `1.27`. Twelve more standard-library
+  vulnerabilities that hokora's own code reaches were published against
+  go1.26.6 — in `net/http`, `net/textproto`, `crypto/tls` and `html/template`
+  (GO-2026-6599 through GO-2026-6617), all fixed in go1.26.9 and in go1.27.2.
+  Building the server from source now needs Go 1.27; **the SDK module still
+  declares `go 1.24`**, so applications importing `sdk` are unaffected.
 
 ### Changed
 
-- **`modernc.org/sqlite` 1.54.0 → 1.56.0** (with `modernc.org/libc` and
-  `github.com/mattn/go-isatty`). No hokora code changes; the DSN and PRAGMA
-  handling is unaffected.
+- **`modernc.org/sqlite` 1.54.0 → 1.60.1** (with `modernc.org/libc`,
+  `modernc.org/memory` and `github.com/mattn/go-isatty`). No hokora code
+  changes; the DSN and PRAGMA handling is unaffected.
+- **`golang.org/x/crypto` 0.54.0 → 0.57.0** and **`golang.org/x/sys`
+  0.47.0 → 0.49.0**. hokora uses only argon2 and `mlockall` from them; no code
+  changes.
+- **A scheduled check now fails when the declared Go version falls behind the
+  latest stable release** (`make toolchain-latest`, run weekly by the new
+  `toolchain` workflow). Dependabot does not raise the `toolchain` line, so
+  until now a stale declaration surfaced only once a vulnerability was
+  published against it. Dependabot is also configured for `tools/go.mod` now;
+  it had been outside the configured directory since the tools were split into
+  their own module, and golangci-lint (2.12.2 → 2.14.0) and govulncheck
+  (1.6.0 → 1.8.0) had gone stale.
 
 ## [0.4.0] - 2026-08-03
 

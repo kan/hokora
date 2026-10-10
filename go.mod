@@ -1,8 +1,8 @@
 module github.com/kan/hokora
 
-go 1.26.0
+go 1.27
 
-toolchain go1.26.6
+toolchain go1.27.2
 
 require (
 	github.com/kan/hokora/sdk v0.0.0
