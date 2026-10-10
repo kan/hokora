@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bundled copy of Mermaid (`docs/assets/vendor/`, nothing is loaded from a CDN).
   The Web UI page shows screenshots taken from a throwaway database filled with
   fictitious data — `make docs-screenshots` retakes them. Code samples are
-  coloured in both the light and the dark theme.
+  coloured in both the light and the dark theme. On wide screens each page of
+  the published site also shows a sticky outline of its headings on the right,
+  with the section being read highlighted.
 
 ## [0.5.0] - 2026-10-10
 

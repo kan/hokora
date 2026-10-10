@@ -67,7 +67,41 @@ body {
 .bar nav a[aria-current="page"] { color: var(--fg); font-weight: 600; }
 .bar .spacer { flex: 1; }
 
-main { max-width: 52rem; margin: 0 auto; padding: 1.5rem 1.2rem 3rem; }
+/* 本文と、その右の「このページの目次」。目次が出ないとき(狭い画面、見出しの
+   少ないページ、JavaScript が無効)は、本文だけが中央に来る。 */
+.page { display: flex; justify-content: center; align-items: flex-start; }
+main { flex: 0 1 52rem; min-width: 0; padding: 1.5rem 1.2rem 3rem; }
+
+.outline { display: none; }
+@media (min-width: 72rem) {
+    .outline:not([hidden]) {
+        display: block;
+        flex: 0 0 16rem;
+        position: sticky;
+        /* 上部のバーの下に固定し、長い一覧は一覧の中をスクロールさせる。 */
+        top: 4rem;
+        max-height: calc(100vh - 5rem);
+        overflow-y: auto;
+        margin-top: 1.5rem;
+        padding: 0 1rem 1rem 0;
+        font-size: 0.85rem;
+        line-height: 1.5;
+    }
+}
+.outline-title { margin: 0 0 0.5rem; font-weight: 600; color: var(--muted); }
+.outline ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
+.outline li { margin: 0; }
+.outline a {
+    display: block;
+    padding: 0.2rem 0 0.2rem 0.8rem;
+    margin-left: -1px;
+    border-left: 2px solid transparent;
+    color: var(--muted);
+    text-decoration: none;
+}
+.outline .outline-h3 a { padding-left: 1.7rem; }
+.outline a:hover { color: var(--fg); }
+.outline a[aria-current] { color: var(--accent); border-left-color: var(--accent); font-weight: 600; }
 footer {
     max-width: 52rem;
     margin: 0 auto;
