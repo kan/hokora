@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the error messages, and the glossary in the README and `docs/OPERATIONS.md`
   all use the new label. The `machine` term is unchanged in the schema, audit
   actions, API, and SDK.
+- **The audit log screen's `actor` and `action` column headers are now
+  「実行者」 and 「操作」** (#25), like the other columns. The recorded values
+  (`user:1`, `secret.reveal`, …) are unchanged.
 - **`modernc.org/sqlite` 1.54.0 → 1.60.1** (with `modernc.org/libc`,
   `modernc.org/memory` and `github.com/mattn/go-isatty`). No hokora code
   changes; the DSN and PRAGMA handling is unaffected.
