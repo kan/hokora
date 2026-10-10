@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The audit log screen's `actor` and `action` column headers are now
   「実行者」 and 「操作」** (#25), like the other columns. The recorded values
   (`user:1`, `secret.reveal`, …) are unchanged.
+- **The Web UI's top bar and table headers now stay in place while scrolling**
+  (#26), so the column names of a long audit log or key list remain visible.
+  CSS only (`position: sticky`); no JavaScript was added.
 - **`modernc.org/sqlite` 1.54.0 → 1.60.1** (with `modernc.org/libc`,
   `modernc.org/memory` and `github.com/mattn/go-isatty`). No hokora code
   changes; the DSN and PRAGMA handling is unaffected.
