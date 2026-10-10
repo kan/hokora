@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-10
+
 ### Security
 
 - **The declared toolchain is now `go1.26.6`** (was `go1.26.5`). Go 1.26.6 fixes
@@ -291,7 +293,8 @@ what it does not.
   rotation, and incident response.
 - **Release tooling**: reproducible Linux amd64/arm64 builds via GoReleaser.
 
-[Unreleased]: https://github.com/kan/hokora/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/kan/hokora/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/kan/hokora/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/kan/hokora/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kan/hokora/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kan/hokora/compare/v0.1.0...v0.2.0
