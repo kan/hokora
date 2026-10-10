@@ -51,7 +51,13 @@ func fullPageData() pageData {
 			At: at, Actor: "user:1", Action: string(ActionSecretReveal),
 			Target: "myapp/prod/DATABASE_URL", Result: string(ResultSuccess), RemoteAddr: "10.8.0.9",
 		}},
-		AuditLimit: uiAuditLimit,
+		AuditView: &auditView{PageSize: auditDefaultPageSize, PageSizes: auditPageSizes},
+		AuditBatch: &AuditRow{
+			ID: 7, At: at, Actor: "web01 (machine:1)", Action: string(ActionSecretRead),
+			Target: "web01 (machine:1) → myapp/prod", Result: string(ResultSuccess), RemoteAddr: "10.0.0.2",
+			BatchSize: 2,
+			Batch:     []AuditBatchItem{{Target: "myapp/prod/API_TOKEN"}, {Target: "myapp/prod/DATABASE_URL"}},
+		},
 	}
 }
 
@@ -61,7 +67,8 @@ func fullPageData() pageData {
 // 「ページ X を要求したら X が描かれる」ことの確認であり、共通のヘッダや
 // 他ページにも出る文言では、取り違えを検出できない。
 var pageMarkers = map[string]string{
-	"audit.html":       "直近",
+	"audit.html":       "件ずつ表示しています",
+	"audit_batch.html": "1 回の呼び出しで読まれた key",
 	"dashboard.html":   "プロジェクトを作成",
 	"environment.html": "item を作成 / 更新",
 	"error.html":       "ダッシュボードへ戻る",

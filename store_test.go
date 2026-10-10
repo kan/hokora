@@ -922,9 +922,15 @@ func TestListUsersIncludesDisabledUsers(t *testing.T) {
 	}
 }
 
+// listAuditRows は絞り込みなしの最新ページを返す(並びや列の対応を見るテスト用)。
+func listAuditRows(ctx context.Context, db *sql.DB, limit int) ([]AuditRow, error) {
+	page, err := ListAuditLogs(ctx, db, AuditQuery{Limit: limit})
+	return page.Rows, err
+}
+
 // **監査ログは新しい順に、上限件数まで返す。**
 //
-// 保持期間は無限(Q4)なので、画面は直近のみを見せる。ここで古い順に
+// 保持期間は無限(Q4)なので、画面は 1 ページ分だけを見せる。ここで古い順に
 // 返すと、上限に達した時点で **最新の記録が画面から見えなくなる。**
 func TestListAuditLogsReturnsTheNewestFirst(t *testing.T) {
 	t.Parallel()
@@ -938,7 +944,7 @@ func TestListAuditLogsReturnsTheNewestFirst(t *testing.T) {
 		}
 	}
 
-	rows, err := ListAuditLogs(t.Context(), store.DB(), 3)
+	rows, err := listAuditRows(t.Context(), store.DB(), 3)
 	if err != nil {
 		t.Fatalf("ListAuditLogs: %v", err)
 	}
@@ -961,7 +967,7 @@ func TestListAuditLogsReturnsTheNewestFirst(t *testing.T) {
 func auditRowsByAction(t *testing.T, db *sql.DB) map[string]AuditRow {
 	t.Helper()
 
-	rows, err := ListAuditLogs(t.Context(), db, 100)
+	rows, err := listAuditRows(t.Context(), db, 100)
 	if err != nil {
 		t.Fatalf("ListAuditLogs: %v", err)
 	}
@@ -1134,7 +1140,7 @@ func TestListAuditLogsKeepsRowsWhoseReferencesAreMissing(t *testing.T) {
 		}
 	}
 
-	rows, err := ListAuditLogs(t.Context(), store.DB(), 100)
+	rows, err := listAuditRows(t.Context(), store.DB(), 100)
 	if err != nil {
 		t.Fatalf("ListAuditLogs: %v", err)
 	}
@@ -1196,7 +1202,7 @@ func TestListAuditLogsBreaksTiesByIDUnderTheLimit(t *testing.T) {
 	}
 
 	const limit = 3
-	rows, err := ListAuditLogs(t.Context(), store.DB(), limit)
+	rows, err := listAuditRows(t.Context(), store.DB(), limit)
 	if err != nil {
 		t.Fatalf("ListAuditLogs: %v", err)
 	}
@@ -1242,7 +1248,7 @@ func TestListAuditLogsMapsEveryColumnToItsField(t *testing.T) {
 		t.Fatalf("marshal detail: %v", err)
 	}
 
-	rows, err := ListAuditLogs(t.Context(), store.DB(), 10)
+	rows, err := listAuditRows(t.Context(), store.DB(), 10)
 	if err != nil {
 		t.Fatalf("ListAuditLogs: %v", err)
 	}

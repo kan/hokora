@@ -16,12 +16,6 @@ import (
 // maxUIFormBody は Web UI のフォームの上限である(DESIGN §7.4)。
 const maxUIFormBody = 128 << 10
 
-// uiAuditLimit は監査ログ画面に出す件数である。
-//
-// **保持期間は無限**(Q4)なので、全件を描画しない。ページングは持たず、
-// 直近のみを見せる(古い記録の調査は DB を直接見る運用)。
-const uiAuditLimit = 200
-
 // loginRate / usernameRate は Web UI ログインの制限である(DESIGN §7.4)。
 // **第一段は送信元 IP**(AGENTS.md ルール 35)。
 const (
@@ -118,6 +112,7 @@ func (u *uiServer) uiMux() *http.ServeMux {
 	mux.HandleFunc("POST /ui/users/{id}/disable", u.authed(needUnsealed, u.handleDisableUser))
 
 	mux.HandleFunc("GET /ui/audit", u.authed(needUnsealed, u.handleAudit))
+	mux.HandleFunc("GET /ui/audit/batch/{id}", u.authed(needUnsealed, u.handleAuditBatch))
 
 	return mux
 }
@@ -879,20 +874,6 @@ func generateInitialPassword() (string, error) {
 	// 生バイト列は secret 相当。エンコード後は best effort で消す(ルール 15)。
 	Zero(raw)
 	return encoded, err
-}
-
-// ---- 監査ログ ----
-
-func (u *uiServer) handleAudit(w http.ResponseWriter, r *http.Request, req uiRequest) {
-	rows, err := ListAuditLogs(r.Context(), u.vault.db, uiAuditLimit)
-	if err != nil {
-		u.internalError(w, r, "list audit logs", err)
-		return
-	}
-	data := u.page(req, "監査ログ")
-	data.Audit = rows
-	data.AuditLimit = uiAuditLimit
-	u.render(w, r, "audit.html", data)
 }
 
 // ---- 補助 ----

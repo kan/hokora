@@ -1,0 +1,31 @@
+{{define "content"}}
+<p class="crumbs"><a href="/ui/audit">監査ログ</a> / 1 回の呼び出し</p>
+{{with .AuditBatch}}
+<h1>1 回の呼び出しで読まれた key</h1>
+<p class="notice">同じ呼び出しで読まれた {{.BatchSize}} 件の key です。記録は key ごとに 1 行あります。</p>
+
+<table class="audit">
+  <thead><tr><th>時刻</th><th>実行者</th><th>操作</th><th>対象</th><th>結果</th><th>送信元</th></tr></thead>
+  <tbody>
+    <tr class="{{.Result}}">
+      <td class="nowrap">{{formatTime .At}}</td>
+      <td>{{.Actor}}</td>
+      <td class="key">{{.Action}}</td>
+      <td>{{.Target}}</td>
+      <td>{{.Result}}</td>
+      <td>{{.RemoteAddr}}</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>key</h2>
+<table class="audit">
+  <thead><tr><th>対象</th><th>詳細</th></tr></thead>
+  <tbody>
+  {{range .Batch}}
+    <tr><td class="key">{{.Target}}</td><td class="detail">{{.Detail}}</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+{{end}}

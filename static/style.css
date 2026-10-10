@@ -153,6 +153,37 @@ form.inline { display: inline; }
 
 table.audit { font-size: 0.85rem; }
 
+/* 監査ログの絞り込みとページ送り */
+.filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 0.6rem 1rem;
+    margin: 0 0 1rem;
+    padding: 0.8rem 1rem;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font-size: 0.85rem;
+}
+.filters label { display: flex; flex-direction: column; gap: 0.2rem; color: var(--muted); }
+.filters input, .filters select {
+    font: inherit;
+    padding: 0.25rem 0.4rem;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: #fff;
+    max-width: 14rem;
+}
+.pager { display: flex; gap: 1.2rem; margin: 0.6rem 0; font-size: 0.9rem; }
+
+/* 同じ呼び出しで読まれた key の一覧(畳んである) */
+details.batch summary { cursor: pointer; color: var(--accent); }
+details.batch ul { list-style: none; margin: 0.3rem 0 0; padding: 0; }
+details.batch li { padding: 0.1rem 0; }
+details.batch .key { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+details.batch .detail { font-size: 0.8rem; color: var(--muted); }
+
 /* マシン一覧 */
 table.machines { font-size: 0.9rem; }
 .app-name { font-weight: 600; }

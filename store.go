@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -864,6 +865,7 @@ func ListUsers(ctx context.Context, db *sql.DB) (_ []UserRow, err error) {
 // immutable な ID(`user:1` / `machine:3`)であって名前ではない(ルール 24)。
 // 名前は user / machine の**現在の値**を JOIN で引いて併記する。
 type AuditRow struct {
+	ID         int64
 	At         time.Time
 	Actor      string
 	Action     string
@@ -871,6 +873,79 @@ type AuditRow struct {
 	Result     string
 	RemoteAddr string
 	Detail     string
+
+	// Batch は、この行が対象にする key である。**key を対象にする行は、1 件でも
+	// ここに入る**(そのとき Target は 'project/env' までで、Detail は空になる)。
+	// bulk fetch(「key ごとに 1 行」)では、同じ呼び出しで書かれた行が、先頭行
+	// 自身を含めて並ぶ。key を対象にしない行(ログイン等)では空である。
+	//
+	// 一覧に出るのは batch の先頭行だけで、残りはここに畳まれる。**行そのものは
+	// DB に key の数だけある**(AGENTS.md ルール 23)。まとめるのは表示だけである。
+	//
+	// 一覧では auditBatchInlineLimit 件までしか載せない。BatchSize は省略した分も
+	// 含む実数である。
+	Batch     []AuditBatchItem
+	BatchSize int
+}
+
+// BatchHidden は、Batch に載せていない key の数を返す。
+func (r AuditRow) BatchHidden() int {
+	return r.BatchSize - len(r.Batch)
+}
+
+// AuditBatchItem は batch の中の 1 行(1 つの key の読み取り)である。
+type AuditBatchItem struct {
+	Target string // 記録時点の表示文字列 'myapp/prod/DATABASE_URL'
+	Detail string
+}
+
+// AuditFilter は監査ログ一覧の絞り込み条件である。ゼロ値は「絞り込まない」。
+//
+// **batch の全行に共通する条件だけを持つ。** 一覧は batch の先頭行だけを拾う
+// (`batch_id IS NULL`)ので、key のように行ごとに違う条件をここへ足すと、
+// 先頭行でない key の読み取りが一覧から消える(DESIGN §5.2)。
+type AuditFilter struct {
+	// From <= at < To。nil なら、その側は絞り込まない。
+	//
+	// **「指定なし」を time.Time のゼロ値で表さない。** ゼロ値(西暦 1 年 1 月
+	// 1 日)は正当な入力から作れてしまう(終了日 0000-12-31 の翌日)。そうすると
+	// 絞り込みが黙って外れ、利用者は絞り込めているつもりで全件を見る。
+	From, To *time.Time
+
+	// 実行者。3 つのうち高々 1 つを指定する。
+	ActorUserID    *int64
+	ActorMachineID *int64
+	ActorAnonymous bool
+
+	Action Action // 空なら全ての操作
+	Result Result // 空なら成功と失敗の両方
+
+	EnvironmentID *int64 // 対象の環境
+}
+
+// AuditCursor は一覧の中の位置である(並び順のキー at, id)。
+type AuditCursor struct {
+	At int64
+	ID int64
+}
+
+// AuditQuery は監査ログ一覧の 1 ページ分の問い合わせである。
+//
+// Before / After はどちらか一方だけを指定する。両方 nil なら最新のページ。
+type AuditQuery struct {
+	Filter AuditFilter
+	Limit  int
+	Before *AuditCursor // この位置より古い行
+	After  *AuditCursor // この位置より新しい行
+}
+
+// AuditPage は監査ログ一覧の 1 ページである。
+type AuditPage struct {
+	Rows []AuditRow
+	// Older / Newer は、このページの外にまだ行があるときだけ非 nil になる。
+	// 値はページの端の行の位置で、そのまま次の AuditQuery に渡せる。
+	Older *AuditCursor
+	Newer *AuditCursor
 }
 
 // listAuditLogsSQL は監査行に、主体・対象の現在の名前を左外部結合する。
@@ -883,29 +958,167 @@ type AuditRow struct {
 // 結合先が 4 つあるのは、対象が machine / user / environment のどれになるかが
 // action で変わるためである。actor 側は user と machine の両方が同時に立つこと
 // はない(AuditEntry.validate が拒否する)。
-// 列は「行そのもの」「actor」「対象」の順に並べる。対象の列は
-// auditTargetRefs のフィールド順と一致させ、そのまま Scan する。
+// 列は「行そのもの」「actor」「対象」「batch の後続行の数」の順に並べる。対象の
+// 列は auditTargetRefs のフィールド順と一致させ、そのまま Scan する。
+//
+// 最後の列は、この行を先頭とする batch の後続行の数である(idx_audit_batch で
+// 引く)。単独の行では 0 になる。
 const listAuditLogsSQL = `
-	SELECT a.at, a.action, a.result, COALESCE(a.remote_addr, ''), COALESCE(a.detail, ''),
+	SELECT a.id, a.at, a.action, a.result, COALESCE(a.remote_addr, ''), COALESCE(a.detail, ''),
 	       a.actor, COALESCE(au.username, ''), COALESCE(am.name, ''),
 	       COALESCE(a.target, ''),
 	       a.target_user_id, COALESCE(tu.username, ''),
 	       a.target_machine_id, COALESCE(tm.name, ''),
-	       COALESCE(tp.slug, ''), COALESCE(te.slug, '')
+	       COALESCE(tp.slug, ''), COALESCE(te.slug, ''),
+	       (SELECT COUNT(*) FROM audit_logs b WHERE b.batch_id = a.id)
 	FROM audit_logs a
 	LEFT JOIN users        au ON au.id = a.actor_user_id
 	LEFT JOIN machines     am ON am.id = a.actor_machine_id
 	LEFT JOIN users        tu ON tu.id = a.target_user_id
 	LEFT JOIN machines     tm ON tm.id = a.target_machine_id
 	LEFT JOIN environments te ON te.id = a.target_environment_id
-	LEFT JOIN projects     tp ON tp.id = te.project_id
-	ORDER BY a.at DESC, a.id DESC LIMIT ?`
+	LEFT JOIN projects     tp ON tp.id = te.project_id`
 
-// ListAuditLogs は監査ログを新しい順に返す。
+// where は絞り込み条件を、SQL の条件式と引数に変換する。
+//
+// **条件式は固定の文字列だけで組み立てる。** 利用者の入力は全て引数(?)で渡す。
+//
+// 先頭は必ず `a.batch_id IS NULL` である。単独の行と batch の先頭行だけを拾い、
+// batch の後続行は先頭行に畳む(AuditRow.Batch)。
+func (f AuditFilter) where() (conds []string, args []any) {
+	conds = []string{"a.batch_id IS NULL"}
+	add := func(cond string, arg any) {
+		conds = append(conds, cond)
+		args = append(args, arg)
+	}
+
+	if f.From != nil {
+		add("a.at >= ?", f.From.Unix())
+	}
+	if f.To != nil {
+		add("a.at < ?", f.To.Unix())
+	}
+	switch {
+	case f.ActorUserID != nil:
+		add("a.actor_user_id = ?", *f.ActorUserID)
+	case f.ActorMachineID != nil:
+		add("a.actor_machine_id = ?", *f.ActorMachineID)
+	case f.ActorAnonymous:
+		conds = append(conds, "a.actor_user_id IS NULL AND a.actor_machine_id IS NULL")
+	}
+	if f.Action != "" {
+		add("a.action = ?", string(f.Action))
+	}
+	if f.Result != "" {
+		add("a.result = ?", string(f.Result))
+	}
+	if f.EnvironmentID != nil {
+		add("a.target_environment_id = ?", *f.EnvironmentID)
+	}
+	return conds, args
+}
+
+// whereFrom は、絞り込み条件に「pos より古い側("<")/ 新しい側(">")」を足した
+// 条件式と引数を返す。op は呼び出し側が書いた定数であり、入力は入らない。
+//
+// 並びは (at DESC, id DESC) で、idx_audit_head がその順に持っている
+// (migrations/0002)。同じ秒の行は id で順序が決まるので、位置は 2 つの組で指す。
+func (f AuditFilter) whereFrom(op string, pos AuditCursor) (string, []any) {
+	conds, args := f.where()
+	conds = append(conds, "(a.at, a.id) "+op+" (?, ?)")
+	return strings.Join(conds, " AND "), append(args, pos.At, pos.ID)
+}
+
+// listSQL は 1 ページ分の問い合わせと引数を組み立てる。
+//
+// **進む方向の先にまだ行があるかを確かめるため、Limit より 1 行多く読む。**
+// 新しい方へ進むとき(After)は古い順に読む(呼び出し側が並べ直す)。
+func (q AuditQuery) listSQL() (string, []any) {
+	var (
+		where string
+		args  []any
+		order = "DESC"
+	)
+	switch {
+	case q.After != nil:
+		where, args = q.Filter.whereFrom(">", *q.After)
+		order = "ASC"
+	case q.Before != nil:
+		where, args = q.Filter.whereFrom("<", *q.Before)
+	default:
+		conds, a := q.Filter.where()
+		where, args = strings.Join(conds, " AND "), a
+	}
+	query := listAuditLogsSQL + " WHERE " + where +
+		" ORDER BY a.at " + order + ", a.id " + order + " LIMIT ?"
+	return query, append(args, q.Limit+1)
+}
+
+// ListAuditLogs は監査ログの 1 ページを、新しい順に返す。
 //
 // **削除機能は実装しない**(AGENTS.md ルール 28)。閲覧のみ。
-func ListAuditLogs(ctx context.Context, db *sql.DB, limit int) (_ []AuditRow, err error) {
-	rows, err := db.QueryContext(ctx, listAuditLogsSQL, limit)
+//
+// ページの位置は (at, id) で指す(keyset)。OFFSET で数えると、行が増え続ける
+// 表では深いページほど遅くなり、読んでいる間に行が足されるとページがずれる。
+func ListAuditLogs(ctx context.Context, db *sql.DB, q AuditQuery) (AuditPage, error) {
+	query, args := q.listSQL()
+	rows, err := queryAuditRows(ctx, db, query, args...)
+	if err != nil {
+		return AuditPage{}, err
+	}
+
+	more := len(rows) > q.Limit
+	if more {
+		rows = rows[:q.Limit]
+	}
+	if q.After != nil {
+		// 新しい方へ進むときは古い順に読んでいる。表示は常に新しい順にする。
+		slices.Reverse(rows)
+	}
+	page := AuditPage{Rows: rows}
+	if len(rows) == 0 {
+		return page, nil
+	}
+	if err := loadAuditBatches(ctx, db, rows, auditBatchInlineLimit); err != nil {
+		return AuditPage{}, err
+	}
+
+	newest := &AuditCursor{At: rows[0].At.Unix(), ID: rows[0].ID}
+	oldest := &AuditCursor{At: rows[len(rows)-1].At.Unix(), ID: rows[len(rows)-1].ID}
+
+	// 進んできた方向の先は more で分かる。**逆の方向は問い合わせて確かめる**
+	// (「戻る」リンクを、行が無いのに出さない)。最新のページには新しい側が無い。
+	var hasOlder, hasNewer bool
+	switch {
+	case q.After != nil:
+		hasNewer = more
+		hasOlder, err = auditRowExists(ctx, db, q.Filter, "<", *oldest)
+	case q.Before != nil:
+		hasOlder = more
+		hasNewer, err = auditRowExists(ctx, db, q.Filter, ">", *newest)
+	default:
+		hasOlder = more
+	}
+	if err != nil {
+		return AuditPage{}, err
+	}
+	if hasOlder {
+		page.Older = oldest
+	}
+	if hasNewer {
+		page.Newer = newest
+	}
+	return page, nil
+}
+
+// queryAuditRows は listAuditLogsSQL の列を読み、表示用に解決する。
+//
+// query は AuditQuery.listSQL が、このファイルに書いた固定の断片(列、結合、
+// 条件式、並び順)だけを繋いで作る。利用者の入力は全て args で渡る。条件に
+// よって使う索引が変わるので、条件式を 1 つの固定の SQL に畳めない
+// (`? IS NULL OR col = ?` の形にすると索引が使われない)。
+func queryAuditRows(ctx context.Context, db *sql.DB, query string, args ...any) (_ []AuditRow, err error) {
+	rows, err := db.QueryContext(ctx, query, args...) //nolint:gosec // G701: 上記のとおり、SQL の文面に入力は入らない
 	if err != nil {
 		return nil, fmt.Errorf("list audit logs: %w", err)
 	}
@@ -922,15 +1135,18 @@ func ListAuditLogs(ctx context.Context, db *sql.DB, limit int) (_ []AuditRow, er
 			at                              int64
 			actorUserName, actorMachineName string
 			target                          auditTargetRefs
+			followers                       int
 		)
-		if err := rows.Scan(&at, &a.Action, &a.Result, &a.RemoteAddr, &a.Detail,
+		if err := rows.Scan(&a.ID, &at, &a.Action, &a.Result, &a.RemoteAddr, &a.Detail,
 			&a.Actor, &actorUserName, &actorMachineName,
 			&target.Stored, &target.UserID, &target.UserName,
 			&target.MachineID, &target.MachineName,
-			&target.ProjectSlug, &target.EnvSlug); err != nil {
+			&target.ProjectSlug, &target.EnvSlug, &followers); err != nil {
 			return nil, fmt.Errorf("scan audit row: %w", err)
 		}
 		a.At = time.Unix(at, 0).UTC()
+		// 対象列で「実行者自身」を見分けるため、名前を付ける前の識別子を渡す。
+		target.Actor = a.Actor
 		// actor は user と machine のどちらか一方しか立たない(validate 済み)。
 		switch {
 		case actorUserName != "":
@@ -938,8 +1154,167 @@ func ListAuditLogs(ctx context.Context, db *sql.DB, limit int) (_ []AuditRow, er
 		case actorMachineName != "":
 			a.Actor = auditSubject(a.Actor, actorMachineName)
 		}
+		// **key を対象にする行は、1 件だけでも batch と同じ形で出す。** 対象列には
+		// 'project/env' を出し、key と detail(version 等)は畳んだ中に出す。
+		// 単独の読み取りと bulk fetch で、画面の見え方を変えない。
+		//
+		// secret.* が記録する target は 'project/env/KEY' である。slug と key は
+		// '/' を含まないので、最後の '/' より前が 'project/env' になる。
+		// **記録時点の文字列から作る**(JOIN で引いた現在の slug は使わない。
+		// 参照先が引けない行でも、どの環境かが読める)。
+		// 拒否された読み取りは target を記録しないので、ここには入らない。
+		keyRow := strings.HasPrefix(a.Action, "secret.") && strings.Contains(target.Stored, "/")
+		if keyRow || followers > 0 {
+			// 自分の key は Batch の 1 件目に入れる。後続行があれば
+			// loadAuditBatches が足す。
+			a.BatchSize = followers + 1
+			a.Batch = []AuditBatchItem{{Target: target.Stored, Detail: a.Detail}}
+			a.Detail = ""
+			target.Stored = target.Stored[:max(strings.LastIndexByte(target.Stored, '/'), 0)]
+		}
 		a.Target = auditTarget(target)
 		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// auditBatchInlineLimit は、一覧の中に畳んで出す batch の key の上限である。
+//
+// **1 ページの件数(auditPageSizes)は先頭行の数しか抑えない。** key が数百個
+// ある environment の bulk fetch が並ぶと、後続行を全て読んで描画するだけで
+// 1 ページが数万行になる。一覧にはここまでを出し、残りは batch の画面
+// (ListAuditBatch)で全て見せる。**件数(BatchSize)は常に実数である。**
+const auditBatchInlineLimit = 50
+
+// loadAuditBatches は、rows の中の batch の先頭行に、後続行を足す。
+//
+// limit は 1 つの batch に載せる key の上限(先頭行を含む)で、0 以下なら全て
+// 載せる。先頭行ごとに LIMIT 付きで引くので、読む行数は「先頭行の数 × limit」で
+// 頭打ちになる(1 回でまとめて引くと、上限を超える分も読んでから捨てることになる)。
+func loadAuditBatches(ctx context.Context, db *sql.DB, rows []AuditRow, limit int) (err error) {
+	memberLimit := -1 // SQLite の LIMIT は負の数で無制限
+	if limit > 0 {
+		memberLimit = limit - 1
+	}
+
+	var stmt *sql.Stmt
+	defer func() {
+		if stmt != nil {
+			if cerr := stmt.Close(); cerr != nil && err == nil {
+				err = fmt.Errorf("list audit batch members: %w", cerr)
+			}
+		}
+	}()
+
+	for i := range rows {
+		// 後続行があるのは 2 件以上の batch だけである(1 件は自分の key だけ)。
+		if rows[i].BatchSize < 2 {
+			continue
+		}
+		if stmt == nil {
+			stmt, err = db.PrepareContext(ctx, `
+				SELECT COALESCE(target, ''), COALESCE(detail, '')
+				FROM audit_logs WHERE batch_id = ? ORDER BY id LIMIT ?`)
+			if err != nil {
+				return fmt.Errorf("list audit batch members: %w", err)
+			}
+		}
+		if rows[i].Batch, err = appendAuditBatchItems(ctx, stmt, rows[i].Batch, rows[i].ID, memberLimit); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func appendAuditBatchItems(ctx context.Context, stmt *sql.Stmt, items []AuditBatchItem, headID int64, limit int) (_ []AuditBatchItem, err error) {
+	members, err := stmt.QueryContext(ctx, headID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list audit batch members: %w", err)
+	}
+	defer func() {
+		if cerr := members.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("list audit batch members: %w", cerr)
+		}
+	}()
+
+	for members.Next() {
+		var item AuditBatchItem
+		if err := members.Scan(&item.Target, &item.Detail); err != nil {
+			return nil, fmt.Errorf("scan audit batch member: %w", err)
+		}
+		items = append(items, item)
+	}
+	return items, members.Err()
+}
+
+// ListAuditBatch は、headID を先頭行とする batch を、key を省略せずに返す。
+//
+// 一覧は 1 つの batch の key を auditBatchInlineLimit 件までしか出さない。
+// **どの key が読まれたかは監査の中身そのものなので、全てを見る手段を残す。**
+// headID が batch の先頭行でなければ ErrNotFound を返す。
+func ListAuditBatch(ctx context.Context, db *sql.DB, headID int64) (*AuditRow, error) {
+	rows, err := queryAuditRows(ctx, db, listAuditLogsSQL+" WHERE a.id = ? AND a.batch_id IS NULL", headID)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) != 1 || rows[0].BatchSize < 2 {
+		return nil, ErrNotFound
+	}
+	if err := loadAuditBatches(ctx, db, rows, 0); err != nil {
+		return nil, err
+	}
+	return &rows[0], nil
+}
+
+// auditRowExists は、絞り込み条件に合う行が pos より古い側("<")または新しい側
+// (">")にあるかを返す。op は呼び出し側が書いた定数であり、入力は入らない。
+func auditRowExists(ctx context.Context, db *sql.DB, f AuditFilter, op string, pos AuditCursor) (bool, error) {
+	where, args := f.whereFrom(op, pos)
+	var exists bool
+	if err := db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM audit_logs a WHERE `+where+`)`, args...).Scan(&exists); err != nil {
+		return false, fmt.Errorf("probe audit logs: %w", err)
+	}
+	return exists, nil
+}
+
+// AuditEnvironment は、監査ログの「対象の環境」で選べる environment である。
+type AuditEnvironment struct {
+	EnvironmentID int64
+	ProjectSlug   string
+	EnvSlug       string
+	// Deleted は environment か、その project が論理削除済みであることを示す。
+	Deleted bool
+}
+
+// ListAuditEnvironments は、監査ログの絞り込みに使う environment を全て返す。
+//
+// **論理削除されたものも含める。** 監査は「その時点で何が起きたか」の記録で
+// あり、削除した environment への過去のアクセスも調べられなければならない
+// (ルール 58 は secret の取得経路の話で、ここには当たらない)。slug は再利用
+// できるので、削除済みかどうかを併せて返す。
+func ListAuditEnvironments(ctx context.Context, db *sql.DB) (_ []AuditEnvironment, err error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT e.id, p.slug, e.slug, (e.deleted_at IS NOT NULL OR p.deleted_at IS NOT NULL)
+		FROM environments e
+		JOIN projects p ON p.id = e.project_id
+		ORDER BY p.slug, e.slug, e.id`)
+	if err != nil {
+		return nil, fmt.Errorf("list audit environments: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("list audit environments: %w", cerr)
+		}
+	}()
+
+	var out []AuditEnvironment
+	for rows.Next() {
+		var e AuditEnvironment
+		if err := rows.Scan(&e.EnvironmentID, &e.ProjectSlug, &e.EnvSlug, &e.Deleted); err != nil {
+			return nil, fmt.Errorf("scan audit environment: %w", err)
+		}
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }
@@ -958,6 +1333,7 @@ func auditSubject(ident, name string) string {
 
 // auditTargetRefs は監査行の対象を指す列をまとめたものである。
 type auditTargetRefs struct {
+	Actor       string // 実行者の識別子('user:1' | 'machine:3' | 'anonymous')
 	Stored      string // target 列(記録時点の表示文字列)
 	UserID      sql.NullInt64
 	UserName    string
@@ -972,23 +1348,40 @@ type auditTargetRefs struct {
 // machine.* / user.* は target 列を持たず ID しか記録しないため、ここで解決
 // しないと画面上は空欄になる。grant.* は「どの machine に、どの environment を」
 // で 1 つの対象なので ' → ' で繋ぐ。
+//
+// **実行者自身は、ほかに出すものがあれば繰り返さない。** machine の secret.read
+// は target_machine_id に自分を記録するので、そのまま出すと実行者列と同じ名前が
+// 対象列にも並び('web01 (machine:3) → myapp/prod')、どこを読んだのかが
+// 埋もれる。対象が実行者自身だけの行(自分のログイン、自分のパスワード変更)は
+// 残す。空欄にすると「対象なし」と区別できない。
 func auditTarget(t auditTargetRefs) string {
-	var parts []string
-	if t.MachineID.Valid {
-		parts = append(parts, auditSubject(actorMachine(t.MachineID.Int64), t.MachineName))
-	}
-	if t.UserID.Valid {
-		parts = append(parts, auditSubject(actorUser(t.UserID.Int64), t.UserName))
-	}
+	var rest string
 	switch {
 	case t.Stored != "":
 		// **記録時点の文字列を優先する。** item の key のように、ID からは
 		// 引き直せない情報が入っている(item は論理削除しても行が残るが、
 		// target 列は「その時どう見えていたか」を保つ)。
-		parts = append(parts, t.Stored)
+		rest = t.Stored
 	case t.ProjectSlug != "" && t.EnvSlug != "":
 		// grant.delete は target 列を持たず environment_id だけを記録する。
-		parts = append(parts, t.ProjectSlug+"/"+t.EnvSlug)
+		rest = t.ProjectSlug + "/" + t.EnvSlug
+	}
+
+	var parts []string
+	subject := func(ident, name string) {
+		if rest != "" && ident == t.Actor {
+			return
+		}
+		parts = append(parts, auditSubject(ident, name))
+	}
+	if t.MachineID.Valid {
+		subject(actorMachine(t.MachineID.Int64), t.MachineName)
+	}
+	if t.UserID.Valid {
+		subject(actorUser(t.UserID.Int64), t.UserName)
+	}
+	if rest != "" {
+		parts = append(parts, rest)
 	}
 	return strings.Join(parts, " → ")
 }

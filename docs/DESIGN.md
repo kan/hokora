@@ -136,7 +136,7 @@ db, err := sql.Open("sqlite", dsn)
 | version | 内容 |
 |---|---|
 | 1 | 初期スキーマ(`schema.sql`) |
-| 2 | `audit_logs.batch_id`、`idx_audit_batch`、`idx_audit_target_env`(§5.2) |
+| 2 | `audit_logs.batch_id`、`idx_audit_batch`、`idx_audit_head` / `_machine` / `_env`(§5.2) |
 
 ### 3.2 なぜ Redis を使わないか
 
@@ -594,8 +594,11 @@ CREATE INDEX idx_audit_actor_user ON audit_logs(actor_user_id, at DESC);
 CREATE INDEX idx_audit_actor_machine ON audit_logs(actor_machine_id, at DESC);
 CREATE INDEX idx_audit_target_item ON audit_logs(target_item_id, at DESC);
 CREATE INDEX idx_audit_batch ON audit_logs(batch_id) WHERE batch_id IS NOT NULL;
-CREATE INDEX idx_audit_target_env ON audit_logs(target_environment_id, at DESC)
-    WHERE target_environment_id IS NOT NULL;
+CREATE INDEX idx_audit_head ON audit_logs(at DESC, id DESC) WHERE batch_id IS NULL;
+CREATE INDEX idx_audit_head_machine ON audit_logs(actor_machine_id, at DESC, id DESC)
+    WHERE batch_id IS NULL AND actor_machine_id IS NOT NULL;
+CREATE INDEX idx_audit_head_env ON audit_logs(target_environment_id, at DESC, id DESC)
+    WHERE batch_id IS NULL AND target_environment_id IS NOT NULL;
 ```
 
 **`batch_id`(bulk fetch の行をまとめる印):**
@@ -640,6 +643,64 @@ slug / key は再利用可能(THREAT_MODEL §11.2)なので、`target` 文字列
 - **すべて `ON DELETE RESTRICT`。** CASCADE を使わない
 - **`audit_logs` は FK を持たない**(参照先が論理削除されても記録は残るべきであり、
   また監査ログの INSERT が FK 検査で失敗するのは避けたい)
+
+**監査ログ画面の一覧(絞り込みとページング):**
+
+保持は無限(§15 の Q4)なので、一覧は全件を描画しない。
+
+- **batch は 1 件として数え、先頭行に畳む。** 一覧は `batch_id IS NULL` の行
+  (単独の行と batch の先頭行)だけを拾い、後続の行は先頭行の中に並べる
+  (`<details>`。JS は使わない)。対象列には batch に共通する部分(machine と
+  environment)を出し、key と version は畳んだ中に出す
+- **ページの位置は `(at, id)` で指す**(keyset)。OFFSET で数えると、行が増え
+  続ける表では深いページほど遅くなり、読んでいる間に行が足されるとページがずれる。
+  並びは `at DESC, id DESC` で、同じ秒の行は `id` で順序が決まる
+- **1 ページの件数は選択肢に限る**(50 / 100 / 200)。任意の数を受け付けると、
+  1 リクエストで表全体を読ませられる
+- **一覧に畳んで出す key は、1 つの batch につき 50 件まで。** ページの件数は
+  先頭行の数しか抑えないので、key が数百個ある environment の bulk fetch が並ぶと
+  1 ページが数万行になる。件数は常に実数を出し、超えた分は「他 N 件」と明示して
+  batch の画面(`GET /ui/audit/batch/{id}`)へ繋ぐ。**batch の画面は key を
+  1 件も省略しない**(読まれた key は監査の中身そのものである)
+- **key を対象にする行は、1 件だけでも batch と同じ形で出す。** 対象列には
+  `project/env` を出し、key と detail(version 等)は畳んだ中に出す。単独の
+  読み取りと bulk fetch で見え方を変えない。**「詳細」の列は持たない。** key を
+  対象にしない行の detail(失敗の理由など)は、対象列の中に「詳細」として畳む
+  (捨てない。失敗の理由は、探索行為と設定ミスを見分ける手掛かりである)
+- **対象列の `project/env` は、記録時点の文字列(`project/env/KEY`)から key を
+  除いて作る。** 現在の slug を結合で引く形にすると、参照先が引けない行で、
+  どの環境の読み取りかが畳んだ行から読めなくなる
+- **対象列は、実行者自身を繰り返さない。** machine の `secret.read` は
+  `target_machine_id` に自分を記録するので、そのまま出すと実行者列と同じ名前が
+  対象列にも並ぶ。ほかに出すもの(環境など)があれば省く。**対象が実行者自身
+  だけの行(自分のログイン、自分のパスワード変更)は残す**(空欄にすると
+  「対象なし」と区別できない)
+- **絞り込みは、期間・実行者・操作・結果・対象の環境**。どれも batch の全行に
+  共通する(上記の制約)。**key での絞り込みは持たない**
+- **クエリ文字列は全て型か allowlist に落とす。** 検証を通らない値があれば
+  400 を返し、その値を画面に戻さない(値はフォームの選択状態として画面に出る)。
+  黙って無視もしない(絞り込めているつもりで全件を見ることになる)。
+  **`URL.Query()` を使わず、生のクエリ文字列を自分で解釈する。** あれは壊れた
+  `%` エスケープや `;` を含む組を黙って捨てる。同じ名前が 2 回あるクエリも拒否
+  する。ID とページ位置は正規形(`01` や `+1` でない形)だけを通す
+- **条件式は固定の断片を繋いで作り、値は引数で渡す。** 条件によって使う索引が
+  変わるので、1 つの固定の SQL(`? IS NULL OR col = ?`)には畳めない
+- **一覧専用の索引 `idx_audit_head` を持つ**
+  (`(at DESC, id DESC) WHERE batch_id IS NULL`)。一覧が拾う行だけを、一覧の
+  並び順どおりに持つ。machine と環境での絞り込みにも同じ形の索引がある
+  (`idx_audit_head_machine` / `idx_audit_head_env`。bulk fetch を調べるときに
+  最も使う絞り込みである)。v1 の `idx_audit_at` は `(at DESC)` だけで同じ秒の中の
+  並びを持たないため、操作や結果だけで絞ると SQLite は「表を全て読んでから
+  並べ替える」計画を選び、batch の後続行(bulk fetch が多ければ行の大半)も
+  表の行まで読んで捨てる。**索引を並び順に合わせ、SQL では索引を指定しない**
+  (`INDEXED BY` は使わない。どの絞り込みにどの索引が効くかを Go 側に複製する
+  ことになり、anonymous の絞り込みでは実際に遅い索引を選ばせてしまった)。
+  計画はテストで固定している
+- 合う行がまれな条件(めったに無い操作)では、索引を端まで辿る。並べ替えは
+  起きないが、時間は一覧が拾う行の数に比例する
+- **無効化した user / machine と、論理削除した environment も選べる。** 監査は
+  過去の記録であり、ルール 58(取得クエリは祖先の `deleted_at` を検査する)は
+  secret の取得経路の話で、ここには当たらない
 
 **名前は記録せず、表示時に解決する:**
 
@@ -1280,6 +1341,7 @@ Strict-Transport-Security: max-age=31536000
 | POST | `/ui/users` | ユーザー作成 | 同上 |
 | POST | `/ui/users/{id}/disable` | 無効化 | 同上 |
 | GET | `/ui/audit` | 監査ログ | 同上 |
+| GET | `/ui/audit/batch/{id}` | 1 回の呼び出しで読まれた key の全件 | 同上 |
 
 #### 初回ログインのフロー
 

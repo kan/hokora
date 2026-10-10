@@ -93,8 +93,10 @@ type pageData struct {
 	Users           []UserRow
 	InitialPassword *initialPassword
 
-	Audit      []AuditRow
-	AuditLimit int
+	Audit     []AuditRow
+	AuditView *auditView
+	// AuditBatch は batch の画面に出す 1 つの batch である(key を省略しない)。
+	AuditBatch *AuditRow
 }
 
 // parseTemplates は embed したテンプレートを起動時に一度だけパースする

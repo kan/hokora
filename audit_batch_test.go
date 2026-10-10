@@ -262,7 +262,7 @@ func TestMigrateFreshAndUpgradedSchemasMatch(t *testing.T) {
 	}
 
 	// 「設定した」ではなく「在る」を確かめる。
-	for _, want := range []string{"column audit_logs.batch_id INTEGER", "index idx_audit_batch ", "index idx_audit_target_env "} {
+	for _, want := range []string{"column audit_logs.batch_id INTEGER", "index idx_audit_batch ", "index idx_audit_head ", "index idx_audit_head_machine ", "index idx_audit_head_env "} {
 		if !slices.ContainsFunc(fresh, func(s string) bool { return strings.HasPrefix(s, want) }) {
 			t.Errorf("audit_logs is missing %q; got %v", want, fresh)
 		}
@@ -622,7 +622,9 @@ func TestCmdInitMigrateOnlyUpgradesAV1DatabaseFile(t *testing.T) {
 	db := store.DB()
 	for _, stmt := range []string{
 		`DROP INDEX idx_audit_batch`,
-		`DROP INDEX idx_audit_target_env`,
+		`DROP INDEX idx_audit_head`,
+		`DROP INDEX idx_audit_head_machine`,
+		`DROP INDEX idx_audit_head_env`,
 		`ALTER TABLE audit_logs DROP COLUMN batch_id`,
 		`PRAGMA user_version = 1`,
 		// v1 の時代に書かれた監査行。
@@ -723,10 +725,18 @@ func TestAuditBatchIndexesAreUsed(t *testing.T) {
 			query: `SELECT COUNT(*) FROM audit_logs WHERE batch_id = ?`,
 			index: "idx_audit_batch",
 		},
+		// 一覧用の索引は `batch_id IS NULL` を条件に持つ。問い合わせがその条件を
+		// 書いていなければ使われない。
 		{
-			name:   "rows of an environment, newest first",
-			query:  `SELECT id FROM audit_logs WHERE target_environment_id = ? ORDER BY at DESC LIMIT 50`,
-			index:  "idx_audit_target_env",
+			name:   "list rows of an environment, newest first",
+			query:  `SELECT id FROM audit_logs WHERE batch_id IS NULL AND target_environment_id = ? ORDER BY at DESC, id DESC LIMIT 50`,
+			index:  "idx_audit_head_env",
+			noSort: true,
+		},
+		{
+			name:   "list rows of a machine, newest first",
+			query:  `SELECT id FROM audit_logs WHERE batch_id IS NULL AND actor_machine_id = ? ORDER BY at DESC, id DESC LIMIT 50`,
+			index:  "idx_audit_head_machine",
 			noSort: true,
 		},
 	}

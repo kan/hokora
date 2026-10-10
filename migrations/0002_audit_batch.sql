@@ -24,8 +24,26 @@ ALTER TABLE audit_logs ADD COLUMN batch_id INTEGER;
 -- 操作)を載せないよう部分インデックスにする。
 CREATE INDEX idx_audit_batch ON audit_logs(batch_id) WHERE batch_id IS NOT NULL;
 
--- 監査ログ画面の「対象の環境」での絞り込み用。環境を持たない行(ログイン、
--- unseal、machine / user の操作など、大半の行)を載せないよう部分インデックスに
--- する。
-CREATE INDEX idx_audit_target_env ON audit_logs(target_environment_id, at DESC)
-    WHERE target_environment_id IS NOT NULL;
+-- 監査ログ画面の一覧用。**一覧が拾う行(単独の行と batch の先頭行)だけを、
+-- 一覧の並び順(at DESC, id DESC)どおりに持つ。**
+--
+-- v1 の idx_audit_at は (at DESC) だけで、同じ秒の中の並び(id DESC)を持たない
+-- ので、操作や結果だけで絞ると SQLite は表全体を読んでから並べ替える。また
+-- batch の後続行(bulk fetch が多ければ行の大半)も載っているので、辿るたびに
+-- 表の行まで読んで捨てることになる。この索引ならどちらも起きない。
+--
+-- idx_audit_at は残す。batch の後続行も含めて時刻で引く用途(DB を直接調べる
+-- 調査)のためである。
+CREATE INDEX idx_audit_head ON audit_logs(at DESC, id DESC) WHERE batch_id IS NULL;
+
+-- 監査ログ画面の「実行者(machine)」「対象の環境」での絞り込み用。
+--
+-- **bulk fetch を調べるときに最も使う絞り込みである。** v1 の
+-- idx_audit_actor_machine は batch の後続行も載せているので、それで絞ると、
+-- 先頭行を 1 ページ分集めるまでに後続行を表の行まで読んでは捨てることになる
+-- (1 回 500 key の bulk fetch なら 500 倍)。一覧が拾う行だけを、一覧の並び順
+-- どおりに持つ。該当しない行(machine でない実行者、環境を持たない操作)も載せない。
+CREATE INDEX idx_audit_head_machine ON audit_logs(actor_machine_id, at DESC, id DESC)
+    WHERE batch_id IS NULL AND actor_machine_id IS NOT NULL;
+CREATE INDEX idx_audit_head_env ON audit_logs(target_environment_id, at DESC, id DESC)
+    WHERE batch_id IS NULL AND target_environment_id IS NOT NULL;

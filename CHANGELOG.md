@@ -40,13 +40,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The audit log screen folds a bulk fetch into one line, and can be filtered
+  and paged** (#22). A client that fetches every key used to add one line per
+  key on every run, pushing logins, reveals and credential changes off the
+  screen. One call is now one line; opening it lists the keys that were read
+  (the first 50 inline, with a link to a page that lists all of them).
+  The screen can be filtered by period, actor, action, result and target
+  environment (disabled machines and deleted environments included), and paged
+  50 / 100 / 200 at a time instead of showing only the latest 200 rows. Nothing
+  about what is recorded changes: there is still one audit row per key.
 - **Audit rows written by one bulk fetch are now marked as one batch**
   (`audit_logs.batch_id`, #22). A bulk fetch still writes one row per key; the
   mark only lets the audit screen show the call as a single line. Rows written
   before the upgrade are left exactly as they are — the audit log stays
   append-only, and guessing which old rows belonged to one call is not
   recorded as fact — so they keep appearing one per key. The migration also
-  adds an index for filtering by environment.
+  adds the indexes the audit list is read through.
 - **Web UI terminology: the machine entity is now labelled 「マシン」** (was
   「サーバー」, and 「アプリ」 before 0.4.0), matching the internal name
   `machine` (#24). 「サーバー」 in the Web UI now refers only to hokora itself
