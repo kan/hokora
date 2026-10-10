@@ -41,6 +41,7 @@ const (
 	ActionMachineCreate       Action = "machine.create"
 	ActionMachineDisable      Action = "machine.disable"
 	ActionMachineRotateSecret Action = "machine.rotate_secret"
+	ActionMachineSetAuthRate  Action = "machine.set_auth_rate"
 
 	ActionGrantCreate Action = "grant.create"
 	ActionGrantDelete Action = "grant.delete"
@@ -64,7 +65,8 @@ var auditActions = map[Action]struct{}{
 	ActionAuthMachine: {}, ActionAuthUser: {}, ActionLogout: {}, ActionCSRFReject: {},
 	ActionUserCreate: {}, ActionUserDisable: {}, ActionUserPasswordChange: {},
 	ActionMachineCreate: {}, ActionMachineDisable: {}, ActionMachineRotateSecret: {},
-	ActionGrantCreate: {}, ActionGrantDelete: {},
+	ActionMachineSetAuthRate: {},
+	ActionGrantCreate:        {}, ActionGrantDelete: {},
 	ActionProjectCreate: {}, ActionProjectDelete: {},
 	ActionEnvironmentCreate: {}, ActionEnvironmentDelete: {},
 	ActionAuditPrune: {},
@@ -136,6 +138,9 @@ type AuditDetail struct {
 	// Before は audit.prune が「この時刻より前の行を対象にした」ことを表す
 	// Unix 秒である。
 	Before *int64 `json:"before,omitempty"`
+	// Rate は machine.set_auth_rate が設定した、認証の上限(回/分)である。
+	// 既定値に戻したときも、その値を入れる。
+	Rate *int64 `json:"rate,omitempty"`
 }
 
 // AuditEntry は監査ログの 1 行である。

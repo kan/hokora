@@ -126,6 +126,12 @@ func (f *apiFixture) putSecret(t *testing.T, key, value string) {
 // do は machineMux に 1 リクエストを送る。
 func (f *apiFixture) do(t *testing.T, method, path, token string, body any) *httptest.ResponseRecorder {
 	t.Helper()
+	return f.doFrom(t, "10.0.0.2:53124", method, path, token, body)
+}
+
+// doFrom は、送信元を指定して machineMux に 1 リクエストを送る。
+func (f *apiFixture) doFrom(t *testing.T, remoteAddr, method, path, token string, body any) *httptest.ResponseRecorder {
+	t.Helper()
 
 	var r *http.Request
 	if body != nil {
@@ -140,7 +146,7 @@ func (f *apiFixture) do(t *testing.T, method, path, token string, body any) *htt
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
-	r.RemoteAddr = "10.0.0.2:53124"
+	r.RemoteAddr = remoteAddr
 
 	w := httptest.NewRecorder()
 	f.api.machineMux().ServeHTTP(w, r)

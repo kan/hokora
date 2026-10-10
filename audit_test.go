@@ -196,7 +196,7 @@ func TestAuditAllowlistAcceptsEveryDefinedAction(t *testing.T) {
 		ActionUnsealAttempt, ActionSeal, ActionMasterRotate,
 		ActionAuthMachine, ActionAuthUser, ActionLogout, ActionCSRFReject,
 		ActionUserCreate, ActionUserDisable, ActionUserPasswordChange,
-		ActionMachineCreate, ActionMachineDisable, ActionMachineRotateSecret,
+		ActionMachineCreate, ActionMachineDisable, ActionMachineRotateSecret, ActionMachineSetAuthRate,
 		ActionGrantCreate, ActionGrantDelete,
 		ActionProjectCreate, ActionProjectDelete,
 		ActionEnvironmentCreate, ActionEnvironmentDelete,

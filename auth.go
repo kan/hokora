@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -267,6 +268,98 @@ func RotateMachineSecret(ctx context.Context, v *Vault, machineID int64, ac audi
 		return "", err
 	}
 	return secret, nil
+}
+
+// errAuthRateOutOfRange は、設定できる範囲の外の上限を表す。
+var errAuthRateOutOfRange = fmt.Errorf("auth rate must be between %d and %d per minute",
+	authTokenRatePerClientID, authTokenRatePerIP)
+
+// SetMachineAuthRate は、machine の認証の上限(回/分、第二段)を変える。
+//
+// 範囲は authTokenRatePerClientID 以上、authTokenRatePerIP 以下である。既定値と
+// 同じ値は「未設定」(NULL)として保存する(既定値を変えたら追随する)。
+//
+// **監査の扱いは、変える向きで分かれる**(AGENTS.md ルール 26 / 27):
+//
+//   - **上げる(緩める)のは fail closed。** 記録できなければ変えない
+//   - **下げるのは fail open。** 制限を強める操作を、監査の障害で止めない
+//   - いまの上限と同じ値なら、何も書かない(監査行も足さない)
+//
+// 向きは、読んでから比べるのではなく **UPDATE の条件**で決める。読んでから
+// 書くと、その間に別の変更が入り、上げる操作が fail open の経路を通りうる。
+// まず「いまの上限より下げる」条件つきの UPDATE を試し、当たらなければ(上げる
+// 操作か、同じ値か、machine が無い)、監査と同じトランザクションで更新する。
+//
+// 監査行が持つのは設定後の値(detail.rate)だけである。**下げた記録は欠けうる**
+// (fail open)ので、並んだ行の差から「上げたか下げたか」を読み取れるとは限らない。
+//
+// **Vault のロックは取らない。** トークンにも DEK にも触れない。次の認証から
+// 新しい上限で数える(その窓で数えた回数は持ち越す)。
+func SetMachineAuthRate(ctx context.Context, db *sql.DB, logger *slog.Logger, machineID int64, rate int, ac auditCtx) error {
+	if rate < authTokenRatePerClientID || rate > authTokenRatePerIP {
+		return errAuthRateOutOfRange
+	}
+	var stored any
+	if rate != authTokenRatePerClientID {
+		stored = rate
+	}
+	applied := int64(rate)
+	// **detail は entry に渡す**(後から entry.Detail を差し替えると、entry が
+	// 入れた via が消える)。
+	entry := ac.entry(ActionMachineSetAuthRate, ResultSuccess, &AuditDetail{Rate: &applied})
+	entry.TargetMachineID = &machineID
+
+	// **比べる相手は、保存された値ではなく、実際に効いている上限である**
+	// (authRateOf と同じ式。範囲の外の古い値は、範囲に収めてから比べる)。
+	const (
+		update    = `UPDATE machines SET auth_rate_per_minute = ?3, updated_at = ?4 WHERE id = ?5 AND `
+		effective = `MIN(MAX(COALESCE(auth_rate_per_minute, ?1), ?1), ?2)`
+	)
+	args := []any{authTokenRatePerClientID, authTokenRatePerIP, stored, ac.Now.Unix(), machineID, rate}
+
+	// 下げる(fail open)。
+	res, err := db.ExecContext(ctx, update+effective+` > ?6`, args...)
+	if err != nil {
+		return fmt.Errorf("%s: %w", ActionMachineSetAuthRate, err)
+	}
+	lowered, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("%s: %w", ActionMachineSetAuthRate, err)
+	}
+	if lowered == 1 {
+		RecordAuditBestEffort(ctx, db, logger, entry)
+		return nil
+	}
+
+	// 上げる(fail closed)。条件は「いまの上限と違う」にしてある: 上の UPDATE との
+	// 間に別の変更が入り、下げる操作になっていても、指定された値にする(監査を
+	// 必須にする側に倒れるだけである)。
+	//
+	// **いまの上限と同じ値なら、何も書かない**(監査行も足さない)。一覧の
+	// 「変更」を、値を変えずに押すたびに行が増えるのを防ぐ。
+	return withTx(ctx, db, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, update+effective+` <> ?6`, args...)
+		if err != nil {
+			return fmt.Errorf("%s: %w", ActionMachineSetAuthRate, err)
+		}
+		changed, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("%s: %w", ActionMachineSetAuthRate, err)
+		}
+		if changed == 1 {
+			return RecordAudit(ctx, tx, entry)
+		}
+
+		var exists bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM machines WHERE id = ?)`, machineID).Scan(&exists); err != nil {
+			return fmt.Errorf("%s: %w", ActionMachineSetAuthRate, err)
+		}
+		if !exists {
+			return fmt.Errorf("machine: %w", ErrNotFound)
+		}
+		return nil
+	})
 }
 
 // revokeMachine は「DB 更新 → トークン削除」を write lock 内で実行する(C8)。

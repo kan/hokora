@@ -171,10 +171,14 @@
     - 各種 create
     - `master.rotate`
     - **`audit.prune`**(緊急の操作ではない。記録できなければ消さない)
+    - **`machine.set_auth_rate` で上限を上げるとき**(レート制限を緩める)。
+      **上げるか下げるかは、読んでから比べずに UPDATE の条件で決める**
+      (間に入った変更で、上げる操作が fail open の経路を通るのを防ぐ)
 27. **fail open は「セキュリティを上げる操作」:**
     - **`seal`**
     - **`machine.disable` / `user.disable` / `grant.delete`**
     - **`machine.rotate_secret` / `user.password_change`**
+    - **`machine.set_auth_rate` で上限を下げるとき、既定値に戻すとき**
     - **token / session の失効**
     - **logout**
     **緊急遮断操作を監査障害で止めてはならない。**
@@ -211,7 +215,11 @@
 
 ### リソース制限
 
-35. **レート制限の第一段は送信元 IP**
+35. **レート制限の第一段は送信元 IP。**
+    **第一段の上限を、リクエストの中身(client_id / username)から引いた値で
+    変えない。設定項目にもしない。** machine ごとに変えられるのは第二段だけで、
+    範囲は既定値以上、第一段の上限以下である(DESIGN §7.4)。
+    キーが攻撃者制御の値でも、**上限は DB に保存された設定から引く**
 36. **プロセス内の map には上限と TTL を設ける**
 37. **HTTP サーバーの timeout を全て設定する**(ゼロは無制限)
 38. **`http.MaxBytesReader` を全ての listener で使う**

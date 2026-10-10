@@ -193,6 +193,21 @@ hokora プロセスと同じ権限、または root 権限があれば `/proc/<p
 上限つき map を埋めることで正規のバケットを LRU で追い出し、制限をリセットできる。
 上限つき map は「メモリ枯渇を防ぐ」ためのものであり、「制限を保証する」ものではない。
 
+**credential ごとの上限(第二段)は、machine ごとに緩められる**(DESIGN §7.4)。
+起動のたびに認証するプログラムが、正規の使い方で既定の 10 回/分を超えるためである。
+これで変わることと、変わらないこと:
+
+- **緩めた machine の credential に対する総当たりは、その分だけ速くなる**
+  (最大で 3 倍の 30 回/分)。client_secret は 256 ビットの乱数なので、
+  この差は総当たりの成否を変えない。第二段は総当たりを防ぐ仕組みではなく、
+  1 つの credential への負荷を抑える網である
+- **送信元 IP ごとの上限(第一段)は変わらない。設定もできない**
+- **上限を上げてあることは、client_id を知っていれば secret なしで観測できる。**
+  既定値を超えて試したときの応答(401 か 429 か)が違う。漏れるのは「その
+  client_id は存在し、上限を上げてある」である。client_id は 100 ビットの乱数で、
+  知らない者が探し当てることはできない。**受容する**
+- 緩められるのは Web UI の admin だけで、変更は監査に残る
+
 ### N8: 高度な持続的脅威(APT)
 
 対象外。
@@ -661,6 +676,8 @@ MK      … 人間が 1Password で保持。ディスクに存在しない
 | **`machine.rotate_secret`** | **fail open** | **漏洩対応の緊急操作。** 新 credential の生成と旧トークンの失効を優先する |
 | **`user.password_change`** | **fail open** | **同上** |
 | **`master.rotate`** | **fail closed** | 緊急操作ではない。監査が必要 |
+| **`machine.set_auth_rate`(上げる)** | **fail closed** | 認証のレート制限を緩める操作。記録できなければ変えない |
+| **`machine.set_auth_rate`(下げる、既定値に戻す)** | **fail open** | 制限を強める操作 |
 
 **設計の一貫性:** 同一 SQLite 内で完結する操作は監査と運命共同体になるため
 fail closed が自然に成立する。分離可能な操作(メモリ上のトークン削除、
@@ -830,3 +847,4 @@ CREATE UNIQUE INDEX idx_projects_slug ON projects(slug) WHERE deleted_at IS NULL
 | 第 3 版 | 外部レビュー 2 件(2 巡目)。T1-a / T1-b の分割、CT ログと IP allowlist、kdump、seal の fail open、削除モデルの独立、mux 分離、auth と seal の排他、DNS-01 認証情報の分離 |
 | 第 4 版 | 外部レビュー 2 件(3 巡目)。主な変更: (1) **§1.2 の「0 個」を「配置を要求しない」に訂正**。アプリサーバー側の swap/core/kdump を **T4 / N5 / §5.4** として明記 (2) **`hokora-client run` 方式では T1-a で `/proc/<pid>/environ` から secret 値が読める**ことを明記し、**V1 が SDK 方式でのみ成立する**ことを訂正(R5) (3) **V3 の「revoke で回復可能」を訂正**。revoke は今後の取得のみ止める(R13) (4) **fail open の線引きを緊急遮断操作まで拡大**(`machine.disable`、`grant.delete`、`user.disable`、`rotate_secret`、`password_change`、logout) (5) **監査ログに immutable ID を持たせる**(§10.2)。slug 再利用との整合 (6) **攻撃者制御の文字列を actor / target にも入れない**(§10.3) (7) **swap は許可し、hokora は mlockall する**(§5.3) (8) 旧 MK とバックアップの関係(R15)、古いバックアップ復元時の権限復活(R16) (9) 論理削除された project へのアクセスを 403 に統一(§11.1) (10) `PrivateMounts=true` による machine 間の credential 分離(B7) |
 | 第 5 版 | 監査ログの刈り込みを認める(§10.7、§11、R17)。本番の実測(導入 80 日で 65 万行、DB のほぼ全部が監査ログ)を受けたもの。**消せるのはオフラインのコマンドだけで、対象は期間を過ぎた machine の成功の行に限る。** 失敗、人の操作、刈り込みの記録は消さない。閾値は運用が決め、既定では何も消さない |
+| 第 6 版 | credential ごとの認証のレート制限(第二段)を、machine ごとに緩められるようにする(N7、§10.4)。起動のたびに認証するクライアントが、正規の使い方で既定値を超えていたことを受けたもの。**送信元 IP ごとの上限(第一段)は変えない。** 上限を上げてあることが client_id を知る者に観測できる点を受容する |

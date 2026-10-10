@@ -194,6 +194,9 @@ td.grants { min-width: 16rem; }
 .grant-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
 .grant-add { display: flex; gap: 0.3rem; align-items: center; }
 .grant-add select { font: inherit; padding: 0.25rem 0.4rem; border: 1px solid var(--line); border-radius: 4px; max-width: 12rem; }
-.grant-add button, td.actions button { padding: 0.25rem 0.6rem; font-size: 0.85rem; }
+.grant-add button, td.actions button, .auth-rate button { padding: 0.25rem 0.6rem; font-size: 0.85rem; }
+.auth-rate { display: flex; gap: 0.3rem; align-items: center; }
+.auth-rate input { font: inherit; width: 4rem; padding: 0.25rem 0.4rem; border: 1px solid var(--line); border-radius: 4px; }
+.auth-rate .unit { color: var(--muted); font-size: 0.8rem; }
 button.linkish { border: none; background: none; padding: 0 0.2rem; cursor: pointer; font-size: 1rem; line-height: 1; }
 button.linkish.danger { color: var(--danger); }

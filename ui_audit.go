@@ -166,8 +166,8 @@ func parseAuditQuery(rawQuery string, loc *time.Location) (q AuditQuery, view au
 	if s := v.Get("n"); s != "" {
 		// 選択肢の値と文字列として一致するものだけを通す("050" や "+50" を
 		// 通さない。ID と同じく、同じ指定を表す書き方を 1 通りにする)。
-		n, err := strconv.Atoi(s)
-		if err != nil || !slices.Contains(auditPageSizes, n) || s != strconv.Itoa(n) {
+		n, ok := parseCanonicalInt(s)
+		if !ok || !slices.Contains(auditPageSizes, n) {
 			return q, view, errAuditQuery
 		}
 		q.Limit, view.PageSize = n, n

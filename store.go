@@ -292,6 +292,26 @@ func FindMachineByClientID(ctx context.Context, q querier, clientID string) (*Ma
 	return &m, nil
 }
 
+// MachineAuthRate は、client_id に対する認証の上限(回/分、第二段)を返す。
+//
+// **存在しない client_id には既定値を返す**(エラーにしない)。secret を検証する
+// 前に呼ばれるので、ここで存在と不在を分けて扱わない。無効な machine も、
+// 設定された値のまま返す。
+//
+// **上限が既定値と違うことは、認証せずに観測できる**(同じ client_id で既定値を
+// 超えて試せば分かる)。つまり「その client_id は存在し、上限を上げてある」が
+// 漏れる。client_id は 100 ビットの乱数で、当てずっぽうには引けないので、
+// これを受容している(THREAT_MODEL の N7)。
+func MachineAuthRate(ctx context.Context, q querier, clientID string) (int, error) {
+	var stored sql.NullInt64
+	err := q.QueryRowContext(ctx,
+		`SELECT auth_rate_per_minute FROM machines WHERE client_id = ?`, clientID).Scan(&stored)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return authTokenRatePerClientID, fmt.Errorf("read machine auth rate: %w", err)
+	}
+	return authRateOf(stored), nil
+}
+
 // MachineIsActive は machine が有効かどうかを返す。
 //
 // **リクエストごとに呼ぶ。** トークンは認証の証明であって認可の証明では
@@ -732,7 +752,9 @@ type MachineRow struct {
 	Name       string
 	Disabled   bool
 	LastAuthAt *time.Time
-	Grants     []GrantRow
+	// AuthRate は認証の上限(回/分、第二段)である。未設定なら既定値が入る。
+	AuthRate int
+	Grants   []GrantRow
 }
 
 // GrantRow は grant 1 件である。
@@ -745,7 +767,8 @@ type GrantRow struct {
 // ListMachines は machine を grant つきで返す。
 func ListMachines(ctx context.Context, db *sql.DB) (_ []MachineRow, err error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, client_id, name, disabled, last_auth_at FROM machines ORDER BY client_id`)
+		SELECT id, client_id, name, disabled, last_auth_at, auth_rate_per_minute
+		FROM machines ORDER BY client_id`)
 	if err != nil {
 		return nil, fmt.Errorf("list machines: %w", err)
 	}
@@ -761,11 +784,13 @@ func ListMachines(ctx context.Context, db *sql.DB) (_ []MachineRow, err error) {
 			m        MachineRow
 			disabled int
 			lastAuth sql.NullInt64
+			authRate sql.NullInt64
 		)
-		if err := rows.Scan(&m.ID, &m.ClientID, &m.Name, &disabled, &lastAuth); err != nil {
+		if err := rows.Scan(&m.ID, &m.ClientID, &m.Name, &disabled, &lastAuth, &authRate); err != nil {
 			return nil, fmt.Errorf("scan machine: %w", err)
 		}
 		m.Disabled = disabled != 0
+		m.AuthRate = authRateOf(authRate)
 		if lastAuth.Valid {
 			at := time.Unix(lastAuth.Int64, 0).UTC()
 			m.LastAuthAt = &at

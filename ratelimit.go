@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"database/sql"
 	"fmt"
 	"sync"
 	"time"
@@ -60,10 +61,28 @@ const unsealRate = 3
 // ボディに入っている攻撃者制御の値なので、そちらだけで制限すると、値を
 // 変えるだけで無制限に試行できてしまう。第二段の client_id 制限は、1 つの
 // credential に対する総当たりを鈍らせるための追加の網である。
+//
+// **第二段の上限は、machine ごとに変えられる**(machines.auth_rate_per_minute)。
+// authTokenRatePerClientID は既定値であり、設定できる値の下限でもある。上限は
+// authTokenRatePerIP である: 第一段は変えないので、それを超える値は効かない
+// (効かない値を設定できると、「上げたのに弾かれる」になる)。
 const (
 	authTokenRatePerIP       = 30
 	authTokenRatePerClientID = 10
 )
+
+// authRateOf は、保存された値(machines.auth_rate_per_minute)から、実際に
+// 使う上限を返す。NULL は既定値である。
+//
+// **範囲の外の値は、範囲に収める。** 画面からは範囲の外の値を保存できない。
+// それでも読む側で収めるのは、定数を変えた後に、古い範囲で保存された値が
+// 残るためである。
+func authRateOf(stored sql.NullInt64) int {
+	if !stored.Valid {
+		return authTokenRatePerClientID
+	}
+	return int(min(max(stored.Int64, authTokenRatePerClientID), authTokenRatePerIP))
+}
 
 // globalKey は「キーで分けない」制限に使う固定キーである。
 //
@@ -108,6 +127,25 @@ func newRateLimiter(limit, maxKeys int) *rateLimiter {
 
 // Allow は 1 回ぶんの試行を記録し、許可するかどうかを返す。
 func (r *rateLimiter) Allow(key string, now time.Time) bool {
+	ok, _ := r.AllowWait(key, now)
+	return ok
+}
+
+// AllowWait は Allow と同じで、拒否したときに、次に試してよくなるまでの時間も返す。
+func (r *rateLimiter) AllowWait(key string, now time.Time) (bool, time.Duration) {
+	return r.Take(key, r.limit, now)
+}
+
+// Take は、上限を呼び出しごとに指定して 1 回ぶんの試行を記録する。
+// **作ったときの上限(Allow / AllowWait が使う値)は見ない。** キーごとに上限が
+// 違う制限(machine ごとの認証の上限)のためのものである。
+//
+// 拒否したときは、**次に試してよくなるまでの時間**(窓が明けるまで)も返す。
+//
+// **limit は、攻撃者が変えられない値から決めること。** キーが攻撃者制御の値
+// (client_id)でも、上限は DB に保存された設定から引く。上限を途中で下げた
+// ときは、その窓の残りにもすぐ効く(数えた回数は持ち越す)。
+func (r *rateLimiter) Take(key string, limit int, now time.Time) (bool, time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -118,8 +156,9 @@ func (r *rateLimiter) Allow(key string, now time.Time) bool {
 			if len(r.buckets) >= r.max {
 				// 新しいキーを受け入れられない。**拒否側に倒す。**
 				// 追い出しを許すと、map を埋める攻撃で他のキーのカウンタを
-				// リセットできてしまう。
-				return false
+				// リセットできてしまう。いつ空くかは分からないので、
+				// 待ち時間は窓 1 つぶんを返す。
+				return false, rateWindow
 			}
 		}
 		b = &bucket{}
@@ -128,11 +167,19 @@ func (r *rateLimiter) Allow(key string, now time.Time) bool {
 		b.count = 0
 	}
 
-	if b.count >= r.limit {
-		return false
+	if b.count >= limit {
+		return false, b.windowEnds.Sub(now)
 	}
 	b.count++
-	return true
+	return true, 0
+}
+
+// retryAfterSeconds は Retry-After ヘッダに入れる秒数を返す。
+//
+// **切り上げる。** 切り捨てると、言われたとおりに待ったクライアントが、窓が
+// 明ける直前にもう 1 回弾かれる。0 は「すぐ再試行してよい」と読めるので返さない。
+func retryAfterSeconds(wait time.Duration) int {
+	return max(1, int((wait+time.Second-1)/time.Second))
 }
 
 // Sweep は期限切れのバケットを削除し、削除件数を返す。

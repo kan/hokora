@@ -86,9 +86,11 @@ type pageData struct {
 	Value   string
 	Version int64
 
-	Machines   []MachineRow
-	Grantable  []GrantableEnvironment
-	Credential *machineCredential
+	Machines  []MachineRow
+	Grantable []GrantableEnvironment
+	// AuthRateMin / AuthRateMax は、machine ごとの認証の上限に設定できる範囲。
+	AuthRateMin, AuthRateMax int
+	Credential               *machineCredential
 
 	Users           []UserRow
 	InitialPassword *initialPassword

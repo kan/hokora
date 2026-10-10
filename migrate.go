@@ -17,6 +17,9 @@ var migration0002SQL string
 //go:embed migrations/0003_audit_indexes.sql
 var migration0003SQL string
 
+//go:embed migrations/0004_machine_auth_rate.sql
+var migration0004SQL string
+
 // migrations は、スキーマを 1 つ進める SQL を順に並べたものである。
 // migrations[i] はバージョン i の DB を i+1 にする。
 //
@@ -37,6 +40,7 @@ var migrations = [...]string{
 	schemaSQL,        // 0 → 1
 	migration0002SQL, // 1 → 2: audit_logs.batch_id と一覧用の索引
 	migration0003SQL, // 2 → 3: audit_logs の使われなくなった索引を外す
+	migration0004SQL, // 3 → 4: machines.auth_rate_per_minute
 }
 
 // schemaVersion は本バイナリが期待するスキーマのバージョンである。

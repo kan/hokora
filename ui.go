@@ -104,6 +104,7 @@ func (u *uiServer) uiMux() *http.ServeMux {
 	mux.HandleFunc("POST /ui/machines", u.authed(needUnsealed, u.handleCreateMachine))
 	mux.HandleFunc("POST /ui/machines/{id}/rotate", u.authed(needUnsealed, u.handleRotateMachine))
 	mux.HandleFunc("POST /ui/machines/{id}/disable", u.authed(needUnsealed, u.handleDisableMachine))
+	mux.HandleFunc("POST /ui/machines/{id}/auth-rate", u.authed(needUnsealed, u.handleSetMachineAuthRate))
 	mux.HandleFunc("POST /ui/machines/{id}/grants", u.authed(needUnsealed, u.handleCreateGrant))
 	mux.HandleFunc("POST /ui/machines/{id}/grants/{envID}/delete", u.authed(needUnsealed, u.handleDeleteGrant))
 
@@ -706,6 +707,7 @@ func (u *uiServer) renderMachines(w http.ResponseWriter, r *http.Request, req ui
 	data := u.page(req, "マシン")
 	data.Machines = machines
 	data.Grantable = grantable
+	data.AuthRateMin, data.AuthRateMax = authTokenRatePerClientID, authTokenRatePerIP
 	data.Credential = credential
 	if credential != nil {
 		// **credential も平文である**(AGENTS.md ルール 50)。
@@ -764,6 +766,27 @@ func (u *uiServer) handleDisableMachine(w http.ResponseWriter, r *http.Request, 
 	}
 	if err := DisableMachine(r.Context(), u.vault, id, req.auditCtx()); err != nil {
 		u.badRequest(w, r, "無効化できませんでした", err)
+		return
+	}
+	http.Redirect(w, r, "/ui/machines", http.StatusSeeOther)
+}
+
+// handleSetMachineAuthRate は、machine の認証の上限(回/分)を変える。
+//
+// **10 進の数字だけを受け取る**("+15" や " 15" は拒否する)。範囲の検査は
+// SetMachineAuthRate が行う。
+func (u *uiServer) handleSetMachineAuthRate(w http.ResponseWriter, r *http.Request, req uiRequest) {
+	id, ok := u.pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	rate, ok := parseCanonicalInt(r.PostFormValue("rate"))
+	if !ok {
+		u.badRequest(w, r, "認証の上限を変更できませんでした", errAuthRateOutOfRange)
+		return
+	}
+	if err := SetMachineAuthRate(r.Context(), u.vault.db, u.logger, id, rate, req.auditCtx()); err != nil {
+		u.badRequest(w, r, "認証の上限を変更できませんでした", err)
 		return
 	}
 	http.Redirect(w, r, "/ui/machines", http.StatusSeeOther)
@@ -902,6 +925,13 @@ func (u *uiServer) pathID(w http.ResponseWriter, r *http.Request, name string) (
 	return id, true
 }
 
+// parseCanonicalInt は、10 進の整数を、**書き方が 1 通りのものだけ**受け取る
+// ("050"、"+50"、" 50" は拒否する)。同じ指定を表す書き方を 1 通りにする。
+func parseCanonicalInt(s string) (int, bool) {
+	n, err := strconv.Atoi(s)
+	return n, err == nil && strconv.Itoa(n) == s
+}
+
 // clientIDOf は表示用に client_id を引く。引けなくても credential の表示は
 // 続ける(再発行そのものは既に成功しており、値を見せないと失われる)。
 func clientIDOf(ctx context.Context, db *sql.DB, machineID int64) string {
@@ -971,6 +1001,9 @@ func userFacingReason(err error) string {
 		return fmt.Sprintf("名前は %d バイト以内で入力してください", MaxMachineNameBytes)
 	case errors.Is(err, errMachineNameControl):
 		return "名前に使えない文字が含まれています"
+	case errors.Is(err, errAuthRateOutOfRange):
+		return fmt.Sprintf("1 分あたり %d 以上 %d 以下の整数で指定してください",
+			authTokenRatePerClientID, authTokenRatePerIP)
 	default:
 		return ""
 	}

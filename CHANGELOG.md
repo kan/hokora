@@ -27,10 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
-- **This release changes the database schema (schema v3). Run
+- **This release changes the database schema (schema v4). Run
   `hokora init --migrate-only` before starting the new binary.** `hokora serve`
   refuses a database whose schema version does not match (`database schema
-  version is 1, want 3`). On an existing database `init` applies only the
+  version is 1, want 4`). On an existing database `init` applies only the
   pending migration and prints no master key and no password. The new
   `--migrate-only` flag makes it fail instead of creating a fresh database when
   the path is wrong. Take a backup with the old binary first — the new binary
@@ -40,6 +40,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The per-credential limit on `POST /v1/auth/token` can be raised for one
+  machine** (#28). The limit was a constant: 10 authentications a minute per
+  `client_id`, successes included. An application that authenticates every time
+  it starts — a script run from cron or once per request, which cannot keep a
+  token — exceeds that as a matter of course, and each rejected start failed
+  (and wrote a `rate_limited` audit row). The Machines page now has a "認証の上限"
+  column: an admin sets the limit for that machine, from 10 (the default) to 30
+  a minute. The change is audited as `machine.set_auth_rate`; raising the limit
+  is refused when the audit row cannot be written, lowering it is not, and
+  submitting the current value writes nothing.
+  **The per-source-IP limit (30 a minute) is unchanged and is not configurable**,
+  so one host still cannot authenticate more than 30 times a minute whatever
+  the machines on it are set to. The setting is per machine, not per project or
+  environment: authentication happens before the server knows which environment
+  will be read. A raised limit can be observed without the secret by anyone who
+  knows the `client_id` (`docs/THREAT_MODEL.md`, N7).
+- **A 429 from `POST /v1/auth/token` now carries `Retry-After`** — the number of
+  seconds until the window that rejected the request ends. **Only callers that
+  speak HTTP to the server themselves can read it.** The SDK and `hokora-client`
+  still report a 429 as a plain "rate limited" error, without the wait, and do
+  not retry.
 - **`hokora audit-prune --keep-days N` deletes routine audit rows older than N
   days** (#27). Until now the audit log could only grow: a client that fetches
   every key each time it starts, run every minute, adds over 30,000 rows a day,

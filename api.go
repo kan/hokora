@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -34,11 +35,14 @@ type machineAPI struct {
 
 func newMachineAPI(v *Vault, logger *slog.Logger) *machineAPI {
 	return &machineAPI{
-		vault:           v,
-		db:              v.db,
-		logger:          logger,
-		ipLimiter:       newRateLimiter(authTokenRatePerIP, 0),
-		clientIDLimiter: newRateLimiter(authTokenRatePerClientID, 0),
+		vault:     v,
+		db:        v.db,
+		logger:    logger,
+		ipLimiter: newRateLimiter(authTokenRatePerIP, 0),
+		// **第二段の上限は machine ごとに違うので、呼び出しごとに渡す**(Take)。
+		// 作るときの上限は 0 にしておく: 誤って Allow で使えば、全て拒否になる
+		// (上限を見ない経路が、黙って既定値で通ることが無い)。
+		clientIDLimiter: newRateLimiter(0, 0),
 		now:             time.Now,
 	}
 }
@@ -75,8 +79,8 @@ func (a *machineAPI) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	// 記録すると「送信元 IP を変えながら大量に叩く」だけで監査 DB を
 	// 膨らませられる。第二段(client_id)まで到達したものは記録する
 	// ── そちらは既に 30 回/分の網を通過している。
-	if !a.ipLimiter.Allow(remoteAddr, now) {
-		a.writeError(w, http.StatusTooManyRequests, "rate_limited")
+	if ok, wait := a.ipLimiter.AllowWait(remoteAddr, now); !ok {
+		a.writeRateLimited(w, wait)
 		return
 	}
 
@@ -87,14 +91,29 @@ func (a *machineAPI) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 第二段: client_id。攻撃者制御の値なので、これ *だけ* には頼らない。
-	if !a.clientIDLimiter.Allow(req.ClientID, now) {
+	//
+	// **上限は machine ごとに変えられる**(#28)。キーは攻撃者が選べるが、上限は
+	// DB に保存された設定から引くので、攻撃者は上げられない。**第一段の上限は、
+	// ここで引いた値では変えない**(ルール 35。変えると、client_id を名乗るだけで
+	// 送信元 IP ごとの網を緩められる)。
+	//
+	// 引けなかったときは既定値(一番厳しい値)で続ける。DB が読めないなら、
+	// この先の検証も通らない。
+	limit, err := MachineAuthRate(r.Context(), a.db, req.ClientID)
+	// クライアントが切断しただけ(ctx の取り消し)は、DB の障害として記録しない。
+	// 未認証の相手が、運用ログの ERROR を増やせることになる。
+	if err != nil && r.Context().Err() == nil {
+		a.logger.ErrorContext(r.Context(), "could not read the auth rate; using the default",
+			slog.String("error", err.Error()))
+	}
+	if ok, wait := a.clientIDLimiter.Take(req.ClientID, limit, now); !ok {
 		// 既に拒否は確定している。記録できなくても応答は 429 のままでよい
 		// (「監査できないから認証を通す」ではなく、拒否側に倒れている)。
 		if err := a.recordAuthFailure(r.Context(), req.ClientID, remoteAddr, now, ReasonRateLimited); err != nil {
 			a.logger.ErrorContext(r.Context(), "could not record a rate limited auth attempt",
 				slog.String("error", err.Error()))
 		}
-		a.writeError(w, http.StatusTooManyRequests, "rate_limited")
+		a.writeRateLimited(w, wait)
 		return
 	}
 
@@ -491,6 +510,15 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, limit int64, dst any
 
 type apiErrorResponse struct {
 	Error string `json:"error"`
+}
+
+// writeRateLimited は 429 を返す。**いつ再試行してよいかを Retry-After で伝える。**
+//
+// 窓が明ける時刻は、弾かれた本人が試行の時刻から計算できる値であり、新しい
+// 情報を与えない。
+func (a *machineAPI) writeRateLimited(w http.ResponseWriter, wait time.Duration) {
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(wait)))
+	a.writeError(w, http.StatusTooManyRequests, "rate_limited")
 }
 
 func (a *machineAPI) writeError(w http.ResponseWriter, code int, reason string) {

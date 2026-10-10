@@ -507,7 +507,9 @@ CREATE TABLE machines (
     disabled        INTEGER NOT NULL DEFAULT 0,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
-    last_auth_at    INTEGER
+    last_auth_at    INTEGER,
+    -- 認証のレート制限(第二段)の上限。NULL は既定値(§7.4)。schema v4
+    auth_rate_per_minute INTEGER CHECK (auth_rate_per_minute IS NULL OR auth_rate_per_minute > 0)
 );
 
 -- grant は物理 DELETE を許可(削除モデルの例外)
@@ -783,6 +785,7 @@ unseal.attempt     seal               master.rotate
 auth.machine       auth.user          logout
 user.create        user.disable       user.password_change
 machine.create     machine.disable    machine.rotate_secret
+machine.set_auth_rate
 grant.create       grant.delete
 project.create     project.delete
 environment.create environment.delete
@@ -800,6 +803,7 @@ type AuditDetail struct {
     Count          *int64  `json:"count,omitempty"`   // audit.prune が消した行数
     SubjectDigest  *string `json:"subject_digest,omitempty"`  // §5.5
     Before         *int64  `json:"before,omitempty"`  // audit.prune の対象の上限(Unix 秒)
+    Rate           *int64  `json:"rate,omitempty"`    // machine.set_auth_rate が設定した上限(回/分)
 }
 
 const (
@@ -1210,12 +1214,54 @@ CSRF トークンを再計算する。
 | 対象 | 制限 | キー |
 |------|------|------|
 | `POST /v1/auth/token` | 30 回/分 | **送信元 IP**(第一段) |
-| `POST /v1/auth/token` | 10 回/分 | client_id(第二段) |
+| `POST /v1/auth/token` | 10 回/分(**machine ごとに 30 まで上げられる**) | client_id(第二段) |
 | Web UI ログイン | 20 回/分 | **送信元 IP**(第一段) |
 | Web UI ログイン | 5 回/分 | username(第二段) |
 | unseal(socket / Web) | 3 回/分 | グローバル |
 
 **送信元 IP を第一段に置くことが重要である。**
+
+どの制限も 1 分の固定窓で、**成功した試行も数える**。Machine API の 429 は、
+窓が明けるまでの秒数を `Retry-After` で返す(切り上げ)。
+
+#### machine ごとの上限(第二段)
+
+第二段の 10 回/分は、トークンを保持して使い回すクライアントを前提にした値である。
+**起動のたびに認証するプログラム**(cron やリクエストごとに起動されるスクリプト)
+はトークンを保持できず、正規の使い方でこれを超える。そこで、第二段の上限を
+machine ごとに変えられるようにしてある(`machines.auth_rate_per_minute`、
+Web UI のマシン画面)。
+
+- **単位は machine である。project / environment ではない。** 認証のリクエストに
+  あるのは client_id だけで、どの環境を読むかは、その後のリクエストで決まる。
+  環境に持たせると、「grant 先の環境の最大値」のような導出が要り、grant の
+  付け外しで認証の上限が変わる
+- **範囲は 10(既定値)以上、30(第一段の上限)以下。** 既定値より厳しくは
+  できない。30 を超える値は第一段に先に弾かれて効かないので、設定させない
+- **第一段は変えない。設定もさせない**(ルール 35)。上限は secret を検証する
+  前に、相手が名乗った client_id で引く。その値で第一段を緩めると、client_id を
+  名乗るだけで送信元 IP ごとの網が緩む。**1 つのホストからは、machine を
+  いくつ置いても 1 分に 30 回までである**
+- **キーは攻撃者制御の値だが、上限は攻撃者が変えられない。** DB に保存された
+  設定から引く。存在しない client_id は既定値で数える
+- 上限を引く問い合わせ(主キー相当の索引で 1 行)が、検証の前に 1 回増える。
+  第一段を通った後なので、送信元 IP ごとに 1 分 30 回までである。sealed 中も引く
+- **上限が既定値と違うことは、secret を知らなくても観測できる**(その client_id で
+  11 回試して、401 が返るか 429 が返るか)。「その client_id は存在し、上限を
+  上げてある」が漏れる。client_id は 100 ビットの乱数なので当てずっぽうには
+  引けず、知っている者にとっては存在は既知である。受容する(THREAT_MODEL N7)
+- **既定値と同じ値は NULL で保存する**(既定値を変えたら追随する)。範囲は
+  アプリケーションが検査し、読む側も範囲に収める(定数を変えた後に古い値が残る)
+- **変更の監査は、向きで分かれる**(`machine.set_auth_rate`、`detail.rate` に
+  設定後の値)。上げるのは fail closed、下げるのと既定値に戻すのは fail open。
+  向きは UPDATE の条件で決める(読んでから比べると、間に入った変更で、上げる
+  操作が fail open の経路を通りうる)。比べる相手は、保存された値ではなく、
+  範囲に収めた後の実際の上限である
+- **いまの上限と同じ値なら、何も書かない**(監査行も足さない)。一覧の「変更」を
+  値を変えずに押すたびに、消えない監査行が増えるのを防ぐ
+- 監査行が持つのは設定後の値だけである。下げた記録は欠けうる(fail open)ので、
+  並んだ行の差から向きを読み取れるとは限らない
+- 変更は次の認証から効く。**下げたときは、その窓で数えた回数を持ち越す**
 
 #### map の上限
 
@@ -1301,6 +1347,10 @@ srv := &http.Server{
 // 429 / 503
 { "error": "rate_limited" } / { "error": "sealed" }
 ```
+
+429 には `Retry-After: <秒>` が付く(§7.4)。**読めるのは、HTTP を自分で話す
+呼び出し側だけである。** SDK と `hokora-client` は 429 を待ち時間なしのエラー
+("rate limited")として返し、再試行もしない。
 
 #### `GET /v1/secrets?project={slug}&env={slug}`
 

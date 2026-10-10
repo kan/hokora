@@ -696,6 +696,8 @@ func TestCmdInitMigrateOnlyUpgradesAV1DatabaseFile(t *testing.T) {
 	}
 	db := store.DB()
 	for _, stmt := range []string{
+		// 0004 を戻す。
+		`ALTER TABLE machines DROP COLUMN auth_rate_per_minute`,
 		// 0003 を戻す(v1 の索引を、全行に張る元の形で作り直す)。
 		`DROP INDEX idx_audit_anonymous`,
 		`DROP INDEX idx_audit_actor_user`,

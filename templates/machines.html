@@ -12,7 +12,7 @@
 {{end}}
 
 <table class="machines">
-  <thead><tr><th>マシン</th><th>状態</th><th>最終認証</th><th>アクセス権</th><th>操作</th></tr></thead>
+  <thead><tr><th>マシン</th><th>状態</th><th>最終認証</th><th>アクセス権</th><th>認証の上限</th><th>操作</th></tr></thead>
   <tbody>
   {{range $machine := .Machines}}
     <tr>
@@ -44,6 +44,14 @@
         </form>
         {{end}}
       </td>
+      <td class="nowrap">
+        <form method="post" action="/ui/machines/{{$machine.ID}}/auth-rate" class="auth-rate">
+          {{template "csrf" $.CSRFToken}}
+          <input type="number" name="rate" value="{{$machine.AuthRate}}" min="{{$.AuthRateMin}}" max="{{$.AuthRateMax}}" step="1" required aria-label="1 分あたりの認証回数の上限">
+          <span class="unit">回/分</span>
+          <button type="submit">変更</button>
+        </form>
+      </td>
       <td class="actions nowrap">
         <form method="post" action="/ui/machines/{{$machine.ID}}/rotate" class="inline">
           {{template "csrf" $.CSRFToken}}
@@ -58,7 +66,7 @@
       </td>
     </tr>
   {{else}}
-    <tr><td colspan="5" class="empty">マシンがありません。</td></tr>
+    <tr><td colspan="6" class="empty">マシンがありません。</td></tr>
   {{end}}
   </tbody>
 </table>
@@ -70,4 +78,7 @@
   <p class="hint">名前は一覧での識別に使います。credential（client_id と client_secret）はサーバーが自動生成し、作成後に一度だけ表示します。</p>
   <button type="submit">作成</button>
 </form>
+
+<h2>認証の上限について</h2>
+<p class="hint">「認証の上限」は、そのマシンの credential で 1 分間に認証できる回数です（{{.AuthRateMin}} 以上 {{.AuthRateMax}} 以下。既定は {{.AuthRateMin}}）。成功した認証も数えます。起動のたびに認証するプログラムを短い間隔で動かすマシンは、ここを上げます。これとは別に、1 つの送信元 IP からの認証は、マシンを問わず 1 分間に {{.AuthRateMax}} 回までです。</p>
 {{end}}
