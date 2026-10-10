@@ -32,6 +32,10 @@ jobs:
       - name: gofmt
         run: make fmt-check
 
+      # docs/ は GitHub Pages の公開元。Liquid として解釈される記法を弾く。
+      - name: docs
+        run: make docs-check
+
       - name: go vet
         run: make vet
 

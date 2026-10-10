@@ -1,0 +1,106 @@
+/* hokora マニュアル(GitHub Pages)。外部からは何も読み込まない。
+   配色は Web UI(static/style.css)に合わせてある。 */
+
+:root {
+    --fg: #1b1b1b;
+    --muted: #666;
+    --bg: #fbfbfa;
+    --panel: #fff;
+    --line: #ddd;
+    --accent: #24507a;
+    --code-bg: #f1f1ef;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --fg: #e6e6e3;
+        --muted: #a0a09b;
+        --bg: #17181a;
+        --panel: #1f2023;
+        --line: #3a3b3f;
+        --accent: #8fb8e0;
+        --code-bg: #26272b;
+    }
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+    font-size: 16px;
+    line-height: 1.75;
+    color: var(--fg);
+    background: var(--bg);
+}
+
+.bar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.7rem 1.2rem;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    /* 幅が足りないときは折り返さず、バーの中を横にスクロールさせる。 */
+    white-space: nowrap;
+    overflow-x: auto;
+}
+.bar a { text-decoration: none; }
+.bar .brand { font-weight: 700; }
+.bar nav { display: flex; gap: 1rem; }
+.bar nav a[aria-current="page"] { color: var(--fg); font-weight: 600; }
+.bar .spacer { flex: 1; }
+
+main { max-width: 52rem; margin: 0 auto; padding: 1.5rem 1.2rem 3rem; }
+footer {
+    max-width: 52rem;
+    margin: 0 auto;
+    padding: 1rem 1.2rem 3rem;
+    border-top: 1px solid var(--line);
+    font-size: 0.85rem;
+}
+
+a { color: var(--accent); }
+
+h1 { font-size: 1.7rem; line-height: 1.35; margin: 0.5rem 0 1rem; }
+h2 { font-size: 1.3rem; line-height: 1.4; margin: 2.6rem 0 0.8rem; padding-bottom: 0.3rem; border-bottom: 1px solid var(--line); }
+h3 { font-size: 1.1rem; margin: 2rem 0 0.6rem; }
+h4 { font-size: 1rem; margin: 1.6rem 0 0.5rem; }
+/* 上部バーを固定しているので、ページ内リンクの着地点を見出しの分だけ下げる。 */
+h1, h2, h3, h4 { scroll-margin-top: 4rem; }
+
+hr { border: 0; border-top: 1px solid var(--line); margin: 2.5rem 0; }
+
+code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.9em;
+    background: var(--code-bg);
+    padding: 0.1em 0.3em;
+    border-radius: 3px;
+}
+pre {
+    background: var(--code-bg);
+    padding: 0.9rem 1rem;
+    border-radius: 4px;
+    overflow-x: auto;
+    line-height: 1.5;
+}
+pre code { background: none; padding: 0; font-size: 0.85rem; }
+
+/* 幅の広い表は、ページではなく表の中を横にスクロールさせる。 */
+table { display: block; overflow-x: auto; border-collapse: collapse; margin: 1rem 0; }
+th, td { text-align: left; padding: 0.45rem 0.7rem; border: 1px solid var(--line); vertical-align: top; min-width: 7em; }
+/* 狭い画面で、見出しの列が 1 文字ずつ縦に折り返すのを防ぐ。 */
+th { background: var(--panel); font-weight: 600; white-space: nowrap; }
+
+blockquote {
+    margin: 1rem 0;
+    padding: 0.2rem 1rem;
+    border-left: 4px solid var(--line);
+    color: var(--muted);
+}
+
+li { margin: 0.2rem 0; }

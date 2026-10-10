@@ -130,7 +130,7 @@ hokora earns its extra moving parts only when you want:
 > not obvious cognates: a *machine* is labelled 「マシン」 and a *grant* is
 > labelled 「アクセス権」. (`machine` / `grant` remain the terms in the schema,
 > audit actions, and SDK.) See the glossary in
-> [docs/OPERATIONS.md](docs/OPERATIONS.md).
+> [docs/manual/glossary.md](docs/manual/glossary.md).
 
 Design details: [docs/DESIGN.md](docs/DESIGN.md). Milestones and status:
 [docs/ROADMAP.md](docs/ROADMAP.md).
@@ -225,6 +225,10 @@ the threat model before trusting it with real secrets.
 ---
 
 ## Documentation
+
+The user manual (Japanese) — glossary, Web UI walkthrough, client usage, and
+command reference — is published at **<https://kan.github.io/hokora/>** and
+lives in [docs/index.md](docs/index.md) and [docs/manual/](docs/manual/).
 
 | File | Contents |
 |------|----------|

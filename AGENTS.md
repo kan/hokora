@@ -499,7 +499,7 @@ hokora/
 ├── cmd/hokora-client/   # クライアント専用バイナリ(get / run)。標準ライブラリ + sdk のみ
 ├── sdk/                 # 外部から import される Go SDK。**別 module**(依存ゼロ)
 ├── tools/               # 開発ツール専用の別 module(golangci-lint / govulncheck)
-└── docs/
+└── docs/                # 設計文書と利用者向けマニュアル。**GitHub Pages の公開元**(下記)
 ```
 
 **サーバー本体は root の `main` パッケージに集約する。** `internal/` を作らず、
@@ -513,6 +513,30 @@ hokora/
 (T1-a に対する新しい防御ではない。`sdk_deps_test.go` が「標準ライブラリ +
 sdk のみ」を不変条件として検査する)。**`cmd/<name>/` を増やすときも
 `package main` に限り、サーバーロジックはあくまで root に置く。**
+
+### docs/ は GitHub Pages の公開元である
+
+`docs/` は、GitHub Pages(Jekyll の標準ビルド)が <https://kan.github.io/hokora/>
+として公開する(設定は `docs/_config.yml`)。
+
+- **`docs/` に置いた Markdown は、front matter が無くても全て公開ページになる。**
+  公開しない作業メモを `docs/` に置かない
+- **`docs/` の Markdown に、波括弧 2 つ(Go のテンプレートの式)と、波括弧 +
+  パーセントを書かない。コードブロックの中でも書かない。** Jekyll が Liquid として
+  解釈し、前者は黙って空になり、後者はサイトのビルドごと落とす。
+  `make docs-check`(`make all` に含まれる)が弾く
+- **利用者向けの使い方は `docs/manual/` に、構築と運用の手順は
+  `docs/OPERATIONS.md` に書く。** 同じ手順を両方に書かない(片方が古くなる)。
+  マニュアルからは Runbook の節番号を参照する
+- **Web UI の表示(ラベル、ボタン、画面の遷移)、コマンドのフラグ、SDK の公開 API を
+  変えたら、`docs/manual/` の該当ページも同じコミットで直す**
+- ページを足したら、`docs/_config.yml` の `nav` に足す
+- マニュアルは です・ます調で、一文ごとに改行する(行の途中で折り返すと、
+  公開ページで日本語の途中に空白が入る)
+- **サイトのビルドは GitHub 側で走り、CI では検証していない。**
+  `make docs-check` が見るのは Liquid の記法だけである。レイアウトや
+  `_config.yml` を変えたら、ローカルで `github-pages` gem を使ってビルドし、
+  表示を確かめる
 
 ### module は 3 つある
 
@@ -623,7 +647,7 @@ M7(リリース準備)
 (品質レビューがソースを直す一方でテスト作成が同じソースを読むため、
 編集が競合する)。
 
-1. **`make all`**(`toolchain-check` → `fmt-check` → `vet` → `lint` → `test` → `build`)を通す。
+1. **`make all`**(`toolchain-check` → `fmt-check` → `docs-check` → `vet` → `lint` → `test` → `build`)を通す。
    `.github/workflows/ci.yml` と同じ内容なので、ここで落ちるものは push
    しても落ちる。**依存を足した / 更新したときは `make vuln` も回す**
    (脆弱性検査は `vuln.yml` に分離してあり、`make all` には含まれない)

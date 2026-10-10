@@ -15,9 +15,21 @@ SUBMODULES := tools/go.mod sdk/go.mod
 MODULES := . sdk
 
 .PHONY: all build build-client test vet fmt fmt-check lint vuln tidy clean \
-        toolchain-check toolchain-latest
+        toolchain-check toolchain-latest docs-check
 
-all: toolchain-check fmt-check vet lint test build
+all: toolchain-check fmt-check docs-check vet lint test build
+
+# docs/ は GitHub Pages(Jekyll)の公開元である。front matter の無い Markdown も
+# 全てページになり、**本文は Liquid として解釈される。** 波括弧 2 つの式は
+# 黙って空になり(Go のテンプレートの例を書くと、その部分だけ消える)、
+# 波括弧とパーセントのタグは未定義ならサイトのビルドごと失敗する。
+# どちらも push した後でしか分からないので、ここで弾く。
+docs-check:
+	@out="$$(grep -rnE '\{\{|\{%' --include='*.md' docs || true)"; \
+	if [ -n "$$out" ]; then \
+		echo "docs/ の Markdown に Liquid として解釈される記法がある (GitHub Pages で消えるか、ビルドが落ちる):"; \
+		echo "$$out"; exit 1; \
+	fi
 
 # go.mod の `toolchain` 行と、実際に走っている処理系の版が一致することを
 # 確かめる。`go` 行は minor までの宣言であって patch を含まないため、

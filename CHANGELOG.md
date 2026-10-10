@@ -40,6 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A user manual, published with GitHub Pages at
+  <https://kan.github.io/hokora/>** (#23). It is written in Japanese and covers
+  a glossary (including how the English terms map to the Web UI's Japanese
+  labels), a walkthrough of the Web UI, how applications fetch secrets (SDK and
+  `hokora-client`), and a command reference. The existing design and operations
+  documents are published on the same site. The sources are `docs/index.md` and
+  `docs/manual/`; procedures stay in `docs/OPERATIONS.md` and the manual links
+  to them. `make docs-check` (part of `make all` and CI) rejects Liquid syntax
+  in `docs/*.md`, which Jekyll would otherwise silently drop from the published
+  page.
 - **The per-credential limit on `POST /v1/auth/token` can be raised for one
   machine** (#28). The limit was a constant: 10 authentications a minute per
   `client_id`, successes included. An application that authenticates every time

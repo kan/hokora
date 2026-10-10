@@ -1,0 +1,55 @@
+# GitHub Pages(Jekyll の標準ビルド)の設定。公開元は master の /docs。
+#
+# docs/ の Markdown は front matter が無くても全てページになる
+# (GitHub Pages が既定で有効にする jekyll-optional-front-matter)。
+# **その本文は Liquid として解釈される。** 波括弧 2 つの式は黙って空に
+# なり、波括弧とパーセントのタグは未定義ならビルドごと失敗するので、
+# `make docs-check` で docs/ の Markdown に含まれていないことを検査する。
+
+title: hokora マニュアル
+description: 単一組織向けの秘匿情報管理サーバー hokora の使い方と用語集
+lang: ja
+
+# プロジェクトサイト(https://kan.github.io/hokora/)なので、パスの先頭に
+# リポジトリ名が付く。レイアウトの URL は全て relative_url を通す。
+baseurl: /hokora
+
+repository_url: https://github.com/kan/hokora
+
+# 変換は GitHub Pages の既定の kramdown で行う。CommonMarkGhPages は、
+# 約物に接する `**` を太字にしない箇所がある(DESIGN.md で実測)。
+# kramdown は既定で引用符とダッシュを別の文字へ置き換えるので、
+# 原文のまま出すように戻す(コマンドのフラグ `--stdin` などを壊さないため)。
+markdown: kramdown
+kramdown:
+  input: GFM
+  smart_quotes: ["apos", "apos", "quot", "quot"]
+  typographic_symbols:
+    ndash: "--"
+    mdash: "---"
+    hellip: "..."
+    laquo: "<<"
+    raquo: ">>"
+
+# front matter の無い Markdown の原文(.md)を、サイトに重ねて出力しない。
+optional_front_matter:
+  remove_originals: true
+
+# 上部のナビゲーション。url は baseurl を除いたパスで書く。
+nav:
+  - title: はじめに
+    url: /
+  - title: 用語集
+    url: /manual/glossary.html
+  - title: Web UI
+    url: /manual/web-ui.html
+  - title: アプリからの取得
+    url: /manual/clients.html
+  - title: コマンド
+    url: /manual/cli.html
+  - title: 運用 Runbook
+    url: /OPERATIONS.html
+  - title: 脅威モデル
+    url: /THREAT_MODEL.html
+  - title: 設計
+    url: /DESIGN.html
