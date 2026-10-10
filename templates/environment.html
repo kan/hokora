@@ -4,10 +4,10 @@
 
 {{if .Credential}}
 <div class="credential">
-  <h2>サーバーを作成しました</h2>
-  <p class="notice">この環境へのアクセス権を持つサーバーを作成しました。この値はここでしか表示されません。いま控えてください。HOKORA_CLIENT_SECRET は再表示できず、失った場合は再発行になります。</p>
+  <h2>マシンを作成しました</h2>
+  <p class="notice">この環境へのアクセス権を持つマシンを作成しました。この値はここでしか表示されません。いま控えてください。HOKORA_CLIENT_SECRET は再表示できず、失った場合は再発行になります。</p>
   {{template "credential" .Credential}}
-  <p><a href="/ui/machines">サーバー一覧へ</a></p>
+  <p><a href="/ui/machines">マシン一覧へ</a></p>
 </div>
 {{end}}
 
@@ -49,11 +49,11 @@
   <button type="submit">保存</button>
 </form>
 
-<h2>この環境にアクセスするサーバーを作成</h2>
+<h2>この環境にアクセスするマシンを作成</h2>
 <form method="post" action="/ui/projects/{{.Env.ProjectSlug}}/{{.Env.EnvSlug}}/machines" class="card">
   {{template "csrf" .CSRFToken}}
   <label>名前 <input type="text" name="name" required placeholder="例: 請求バッチ"></label>
-  <p class="hint">この環境（{{.Env.ProjectSlug}} / {{.Env.EnvSlug}}）へのアクセス権を持つサーバーを作成し、credential を一度だけ表示します。他の環境へのアクセス権はサーバー画面から追加できます。</p>
+  <p class="hint">この環境（{{.Env.ProjectSlug}} / {{.Env.EnvSlug}}）へのアクセス権を持つマシンを作成し、credential を一度だけ表示します。他の環境へのアクセス権はマシン画面から追加できます。</p>
   <button type="submit">作成</button>
 </form>
 {{end}}

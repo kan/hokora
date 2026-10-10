@@ -540,7 +540,7 @@ func TestUIMachineCredentialIsShownOnce(t *testing.T) {
 	assertBFCacheReplace(t, w.Body.String(), "/ui/machines")
 }
 
-// **environment 画面からサーバーを作ると、その環境への grant 付きで作られ、
+// **environment 画面からマシンを作ると、その環境への grant 付きで作られ、
 // credential を一度だけ表示する**(#9)。
 //
 // credential も平文なので、平文ページと同じく data-bfcache="replace" で退避する
@@ -584,7 +584,7 @@ func TestUICreateMachineForEnv(t *testing.T) {
 	}
 }
 
-// **environment 画面からのサーバー作成でも、空の名前は弾く**(#7 の必須検証)。
+// **environment 画面からのマシン作成でも、空の名前は弾く**(#7 の必須検証)。
 //
 // 弾いたときは machine 行を残さない(400 を返すだけで作らない)。
 func TestUICreateMachineForEnvRejectsAnEmptyName(t *testing.T) {
@@ -609,7 +609,7 @@ func TestUICreateMachineForEnvRejectsAnEmptyName(t *testing.T) {
 }
 
 // **一覧に client_id を出さない**(#7)。作成・再発行時の credential ブロックだけが
-// client_id を見せ、サーバー一覧は名前で識別する。
+// client_id を見せ、マシン一覧は名前で識別する。
 func TestUIMachineListOmitsClientID(t *testing.T) {
 	t.Parallel()
 

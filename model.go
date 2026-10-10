@@ -119,7 +119,7 @@ type Keyring struct {
 // MaxSecretValueBytes は secret 値の最大バイト数である(DESIGN §5.3)。
 const MaxSecretValueBytes = 64 << 10
 
-// MaxMachineNameBytes は machine(サーバー) 表示名の最大バイト数である。
+// MaxMachineNameBytes は machine(マシン) 表示名の最大バイト数である。
 const MaxMachineNameBytes = 200
 
 // slug は URL パス(/ui/projects/{slug})にそのまま載る。大文字小文字の同一視や
@@ -143,14 +143,14 @@ var (
 	errMachineNameControl = errors.New("machine name is not valid UTF-8 or contains control characters")
 )
 
-// NormalizeMachineName は前後の空白を除いた machine(サーバー) 表示名を返す。
+// NormalizeMachineName は前後の空白を除いた machine(マシン) 表示名を返す。
 //
 // 名前は秘密ではないので、MK(ルール13)と違い trim してよい。
 func NormalizeMachineName(name string) string {
 	return strings.TrimSpace(name)
 }
 
-// ValidateMachineName は machine(サーバー) の表示名を検証する。
+// ValidateMachineName は machine(マシン) の表示名を検証する。
 //
 // **名前は必須である。** 一覧では client_id を出さず、名前が唯一の識別子に
 // なるため(#7)。監査ログには machine の immutable ID を記録し name は入れない

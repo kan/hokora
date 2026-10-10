@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Web UI terminology: the machine entity is now labelled 「マシン」** (was
+  「サーバー」, and 「アプリ」 before 0.4.0), matching the internal name
+  `machine` (#24). 「サーバー」 in the Web UI now refers only to hokora itself
+  ("サーバーは sealed です"). The header, the machine and environment screens,
+  the error messages, and the glossary in the README and `docs/OPERATIONS.md`
+  all use the new label. The `machine` term is unchanged in the schema, audit
+  actions, API, and SDK.
 - **`modernc.org/sqlite` 1.54.0 → 1.60.1** (with `modernc.org/libc`,
   `modernc.org/memory` and `github.com/mattn/go-isatty`). No hokora code
   changes; the DSN and PRAGMA handling is unaffected.

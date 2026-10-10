@@ -122,7 +122,7 @@ func TestValidateSecretValue(t *testing.T) {
 	}
 }
 
-// **machine(サーバー) の表示名は必須で、制御文字・不正 UTF-8・上限超えを弾く。**
+// **machine(マシン) の表示名は必須で、制御文字・不正 UTF-8・上限超えを弾く。**
 //
 // 名前は一覧での唯一の識別子(client_id を出さない #7)なので空を許さない。
 // ValidateMachineName は **正規化済み** の値を受け取る前提なので、ここでは

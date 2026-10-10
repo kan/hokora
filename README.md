@@ -127,7 +127,7 @@ hokora earns its extra moving parts only when you want:
 
 > **Web UI labels (Japanese).** This README, the code, and the API use the
 > English technical terms; the Web UI shows Japanese labels. The two that are
-> not obvious cognates: a *machine* is labelled 「サーバー」 and a *grant* is
+> not obvious cognates: a *machine* is labelled 「マシン」 and a *grant* is
 > labelled 「アクセス権」. (`machine` / `grant` remain the terms in the schema,
 > audit actions, and SDK.) See the glossary in
 > [docs/OPERATIONS.md](docs/OPERATIONS.md).

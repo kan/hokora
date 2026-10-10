@@ -1,10 +1,10 @@
 {{define "content"}}
-<h1>サーバー</h1>
-<p class="notice">サーバーは secret を取得する Web システム等です。各サーバーには credential（HOKORA_CLIENT_ID と HOKORA_CLIENT_SECRET の組）を発行し、アクセス権で「どの環境の secret を取得できるか」を割り当てます。</p>
+<h1>マシン</h1>
+<p class="notice">マシンは secret を取得する Web システム等です。各マシンには credential（HOKORA_CLIENT_ID と HOKORA_CLIENT_SECRET の組）を発行し、アクセス権で「どの環境の secret を取得できるか」を割り当てます。</p>
 
 {{if .Credential}}
 <div class="credential">
-  <h2>{{if .Credential.Rotated}}credential を再発行しました{{else}}サーバーを作成しました{{end}}</h2>
+  <h2>{{if .Credential.Rotated}}credential を再発行しました{{else}}マシンを作成しました{{end}}</h2>
   <p class="notice">この値はここでしか表示されません。いま控えてください。HOKORA_CLIENT_SECRET は再表示できず、失った場合は再発行になります。</p>
   {{template "credential" .Credential}}
   <p><a href="/ui/machines">一覧へ戻る</a></p>
@@ -12,7 +12,7 @@
 {{end}}
 
 <table class="machines">
-  <thead><tr><th>サーバー</th><th>状態</th><th>最終認証</th><th>アクセス権</th><th>操作</th></tr></thead>
+  <thead><tr><th>マシン</th><th>状態</th><th>最終認証</th><th>アクセス権</th><th>操作</th></tr></thead>
   <tbody>
   {{range $machine := .Machines}}
     <tr>
@@ -58,12 +58,12 @@
       </td>
     </tr>
   {{else}}
-    <tr><td colspan="5" class="empty">サーバーがありません。</td></tr>
+    <tr><td colspan="5" class="empty">マシンがありません。</td></tr>
   {{end}}
   </tbody>
 </table>
 
-<h2>サーバーを作成</h2>
+<h2>マシンを作成</h2>
 <form method="post" action="/ui/machines" class="card">
   {{template "csrf" .CSRFToken}}
   <label>名前 <input type="text" name="name" required placeholder="例: 請求バッチ"></label>

@@ -522,7 +522,7 @@ func (u *uiServer) handleEnvironment(w http.ResponseWriter, r *http.Request, req
 }
 
 // renderEnvironment は environment のページを描く。credential が非 nil なら、
-// この環境向けに作成したサーバーの credential を**一度だけ**表示する(#9)。
+// この環境向けに作成したマシンの credential を**一度だけ**表示する(#9)。
 func (u *uiServer) renderEnvironment(w http.ResponseWriter, r *http.Request, req uiRequest, env *EnvironmentRef, credential *machineCredential) {
 	// **一覧は平文を返さない**(AGENTS.md ルール 41)。ItemRow に値が無い。
 	items, err := ListItems(r.Context(), u.vault.db, env.EnvironmentID)
@@ -545,7 +545,7 @@ func (u *uiServer) renderEnvironment(w http.ResponseWriter, r *http.Request, req
 }
 
 // handleCreateMachineForEnv は environment 画面から、この環境へのアクセス権を
-// 持つサーバーを作成する(#9)。作成とアクセス権付与は 1 トランザクション。
+// 持つマシンを作成する(#9)。作成とアクセス権付与は 1 トランザクション。
 func (u *uiServer) handleCreateMachineForEnv(w http.ResponseWriter, r *http.Request, req uiRequest) {
 	env, ok := u.resolveEnv(w, r)
 	if !ok {
@@ -561,7 +561,7 @@ func (u *uiServer) handleCreateMachineForEnv(w http.ResponseWriter, r *http.Requ
 
 	_, secret, err := CreateMachineWithGrant(r.Context(), u.vault.db, clientID, r.PostFormValue("name"), env.EnvironmentID, req.auditCtx())
 	if err != nil {
-		u.badRequest(w, r, "サーバーを作成できませんでした", err)
+		u.badRequest(w, r, "マシンを作成できませんでした", err)
 		return
 	}
 	// **client_secret はここでしか表示されない**(machines と同じ。ルール50)。
@@ -708,7 +708,7 @@ func (u *uiServer) renderMachines(w http.ResponseWriter, r *http.Request, req ui
 		return
 	}
 
-	data := u.page(req, "サーバー")
+	data := u.page(req, "マシン")
 	data.Machines = machines
 	data.Grantable = grantable
 	data.Credential = credential
@@ -738,7 +738,7 @@ func (u *uiServer) handleCreateMachine(w http.ResponseWriter, r *http.Request, r
 
 	_, secret, err := CreateMachine(r.Context(), u.vault.db, clientID, r.PostFormValue("name"), req.auditCtx())
 	if err != nil {
-		u.badRequest(w, r, "サーバーを作成できませんでした", err)
+		u.badRequest(w, r, "マシンを作成できませんでした", err)
 		return
 	}
 	// **client_secret はここでしか表示されない。** 保存されるのは

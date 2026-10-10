@@ -17,7 +17,7 @@ revoke の限界）を誤解しないよう、まず `docs/THREAT_MODEL.md` を�
 
 | 本書 / コード / API | Web UI 表示 | 意味 |
 |---|---|---|
-| machine | **サーバー** | secret を取得する Web システム等。1 個の失効可能な credential を持つ |
+| machine | **マシン** | secret を取得する Web システム等。1 個の失効可能な credential を持つ |
 | grant | **アクセス権** | machine が「どの environment の secret を取得できるか」の割り当て |
 | project / environment / item | プロジェクト / 環境 / （key 単位） | secret の階層 |
 | credential | credential（`HOKORA_CLIENT_ID` / `HOKORA_CLIENT_SECRET`） | machine の認証情報 |
@@ -26,7 +26,7 @@ revoke の限界）を誤解しないよう、まず `docs/THREAT_MODEL.md` を�
 > action（`machine.create` / `grant.delete`）・SDK でも使う実装用語である。
 > **本書ではこれらを英語のまま用いる。** THREAT_MODEL / DESIGN で言う
 > 「アプリサーバー」は攻撃者が侵入しうる**顧客のアプリ実行ホスト**を指し、
-> hokora サーバー自身とも Web UI 上の「サーバー」とも別概念である。
+> hokora サーバー自身とも Web UI 上の「マシン」とも別概念である。
 
 ---
 
