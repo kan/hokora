@@ -429,7 +429,7 @@ func (a *machineAPI) recordSecretReads(ctx context.Context, req authorizedReques
 			// target は DB から読んだ値だけで組み立てる。リクエストの生の
 			// 文字列は入れない(AGENTS.md ルール 25)。
 			target := req.env.ProjectSlug + "/" + req.env.EnvSlug + "/" + s.Key
-			version := int(s.Version)
+			version := s.Version
 
 			entry := ac.entry(ActionSecretRead, ResultSuccess, &AuditDetail{Version: &version})
 			entry.Target = &target

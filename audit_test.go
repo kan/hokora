@@ -46,7 +46,7 @@ func TestRecordAuditRoundTrip(t *testing.T) {
 		TargetItemID:    ptr(int64(3)),
 		Result:          ResultSuccess,
 		RemoteAddr:      ptr("10.0.0.2"),
-		Detail:          &AuditDetail{Version: ptr(2)},
+		Detail:          &AuditDetail{Version: ptr(int64(2))},
 	}
 	if err := RecordAudit(t.Context(), store.DB(), entry); err != nil {
 		t.Fatalf("RecordAudit: %v", err)

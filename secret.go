@@ -24,7 +24,7 @@ func (r secretRef) target() string {
 }
 
 // auditEntry は secret 操作の監査行を組み立てる。**対象の ID を必ず埋める。**
-func (r secretRef) auditEntry(ac auditCtx, action Action, result Result, version int) AuditEntry {
+func (r secretRef) auditEntry(ac auditCtx, action Action, result Result, version int64) AuditEntry {
 	target := r.target()
 	entry := ac.entry(action, result, &AuditDetail{Version: &version})
 	entry.Target = &target
@@ -91,7 +91,7 @@ func PutSecret(ctx context.Context, v *Vault, env *EnvironmentRef, key string, v
 			}
 
 			ref := secretRef{Env: env, ItemID: itemID, Key: key}
-			return RecordAudit(ctx, tx, ref.auditEntry(ac, ActionSecretWrite, ResultSuccess, int(version)))
+			return RecordAudit(ctx, tx, ref.auditEntry(ac, ActionSecretWrite, ResultSuccess, version))
 		})
 	})
 }
@@ -158,7 +158,7 @@ func RevealSecret(ctx context.Context, v *Vault, env *EnvironmentRef, key string
 
 	// **記録してから返す。** ここが失敗したら平文は返さない(fail closed)。
 	ref := secretRef{Env: env, ItemID: item.ID, Key: key}
-	if err := RecordAudit(ctx, v.db, ref.auditEntry(ac, ActionSecretReveal, ResultSuccess, int(version))); err != nil {
+	if err := RecordAudit(ctx, v.db, ref.auditEntry(ac, ActionSecretReveal, ResultSuccess, version)); err != nil {
 		return "", err
 	}
 	return string(plaintext), nil
@@ -188,7 +188,7 @@ func DeleteItem(ctx context.Context, db *sql.DB, env *EnvironmentRef, key string
 		}
 
 		ref := secretRef{Env: env, ItemID: item.ID, Key: key}
-		return RecordAudit(ctx, tx, ref.auditEntry(ac, ActionSecretDelete, ResultSuccess, int(item.CurrentVersion)))
+		return RecordAudit(ctx, tx, ref.auditEntry(ac, ActionSecretDelete, ResultSuccess, item.CurrentVersion))
 	})
 }
 

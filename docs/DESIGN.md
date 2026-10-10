@@ -640,7 +640,7 @@ environment.create environment.delete
 
 ```go
 type AuditDetail struct {
-    Version        *int    `json:"version,omitempty"`
+    Version        *int64  `json:"version,omitempty"`
     Reason         *string `json:"reason,omitempty"`  // 下記の定数のみ
     Via            *string `json:"via,omitempty"`     // "socket" | "web"
     Count          *int    `json:"count,omitempty"`

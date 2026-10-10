@@ -119,7 +119,7 @@ const ActorAnonymous = "anonymous"
 // 型付き allowlist はフィールド名を制限するだけで値の安全性を保証しない
 // (AGENTS.md ルール 25)。
 type AuditDetail struct {
-	Version       *int    `json:"version,omitempty"`
+	Version       *int64  `json:"version,omitempty"`
 	Reason        *string `json:"reason,omitempty"`
 	Via           *string `json:"via,omitempty"`
 	Count         *int    `json:"count,omitempty"`
