@@ -449,9 +449,10 @@ func TestListAuditLogsNeverSortsTheWholeTable(t *testing.T) {
 		{"actor machine", AuditQuery{Filter: AuditFilter{ActorMachineID: &id}, Before: pos}, "idx_audit_head_machine"},
 		{"machine and action", AuditQuery{Filter: AuditFilter{ActorMachineID: &id, Action: ActionSecretRead}}, "idx_audit_head_machine"},
 		{"environment", AuditQuery{Filter: AuditFilter{EnvironmentID: &id}}, "idx_audit_head_env"},
-		// user と anonymous は v1 の索引で絞ってから時刻順に辿る(batch の後続行は
-		// machine の行なので、ここには混ざらない)。
-		{"anonymous", AuditQuery{Filter: AuditFilter{ActorAnonymous: true}}, "idx_audit_actor_"},
+		// user と anonymous は、該当する行だけを並び順どおりに持つ索引で引く
+		// (どちらも行は少ない。batch の後続行は machine の行なので混ざらない)。
+		{"anonymous", AuditQuery{Filter: AuditFilter{ActorAnonymous: true}}, "idx_audit_anonymous"},
+		{"anonymous older page", AuditQuery{Filter: AuditFilter{ActorAnonymous: true, Result: ResultFailure}, Before: pos}, "idx_audit_anonymous"},
 		{"actor user", AuditQuery{Filter: AuditFilter{ActorUserID: &id}}, "idx_audit_actor_user"},
 	}
 	for _, tt := range tests {
@@ -470,8 +471,9 @@ func TestListAuditLogsNeverSortsTheWholeTable(t *testing.T) {
 			if !strings.Contains(plan, " a USING INDEX "+tt.index) {
 				t.Errorf("the plan does not walk audit_logs through %s*:\n%s", tt.index, plan)
 			}
-			// idx_audit_head* は並び順どおりなので、並べ替えが一切要らない。
-			if strings.HasPrefix(tt.index, "idx_audit_head") && strings.Contains(plan, "USE TEMP B-TREE") {
+			// 一覧が使う索引はどれも並び順(at DESC, id DESC)どおりなので、
+			// 並べ替えが一切要らない。
+			if strings.Contains(plan, "USE TEMP B-TREE") {
 				t.Errorf("the plan sorts although %s is already in list order:\n%s", tt.index, plan)
 			}
 		})

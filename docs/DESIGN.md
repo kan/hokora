@@ -137,6 +137,7 @@ db, err := sql.Open("sqlite", dsn)
 |---|---|
 | 1 | 初期スキーマ(`schema.sql`) |
 | 2 | `audit_logs.batch_id`、`idx_audit_batch`、`idx_audit_head` / `_machine` / `_env`(§5.2) |
+| 3 | `audit_logs` の使われなくなった索引を外す。`idx_audit_actor_user` を部分索引に、`idx_audit_anonymous` を追加(§5.2) |
 
 ### 3.2 なぜ Redis を使わないか
 
@@ -589,17 +590,51 @@ CREATE TABLE audit_logs (
     batch_id        INTEGER             -- 同じ呼び出しの行をまとめる印(下記。v2)
 );
 
-CREATE INDEX idx_audit_at ON audit_logs(at DESC);
-CREATE INDEX idx_audit_actor_user ON audit_logs(actor_user_id, at DESC);
-CREATE INDEX idx_audit_actor_machine ON audit_logs(actor_machine_id, at DESC);
-CREATE INDEX idx_audit_target_item ON audit_logs(target_item_id, at DESC);
+-- key で引く(「この key を誰が読んだか」)。画面は key での絞り込みを持たない
+-- ので、侵害の調査で DB を直接引くときに使う
+CREATE INDEX idx_audit_target_item ON audit_logs(target_item_id, at DESC)
+    WHERE target_item_id IS NOT NULL;
+-- batch の後続行を、先頭行の id で引く
 CREATE INDEX idx_audit_batch ON audit_logs(batch_id) WHERE batch_id IS NOT NULL;
+-- 一覧用。一覧が拾う行だけを、一覧の並び順どおりに持つ
 CREATE INDEX idx_audit_head ON audit_logs(at DESC, id DESC) WHERE batch_id IS NULL;
 CREATE INDEX idx_audit_head_machine ON audit_logs(actor_machine_id, at DESC, id DESC)
     WHERE batch_id IS NULL AND actor_machine_id IS NOT NULL;
 CREATE INDEX idx_audit_head_env ON audit_logs(target_environment_id, at DESC, id DESC)
     WHERE batch_id IS NULL AND target_environment_id IS NOT NULL;
+CREATE INDEX idx_audit_actor_user ON audit_logs(actor_user_id, at DESC, id DESC)
+    WHERE actor_user_id IS NOT NULL;
+CREATE INDEX idx_audit_anonymous ON audit_logs(at DESC, id DESC)
+    WHERE actor_user_id IS NULL AND actor_machine_id IS NULL;
 ```
+
+**索引は、使う問い合わせがあるものだけを持つ(v3):**
+
+v1 は `(at)`、`(actor_user_id, at)`、`(actor_machine_id, at)`、
+`(target_item_id, at)` の 4 本を全行に張っていた。**本番の実測では、索引の合計が
+表の本体と同じ大きさになっていた**(80 日・65 万行で、表 73MB、索引 73MB)。
+監査の 1 行を書くたびに 4 本を更新してもいた(secret の読み取りのたびに通る、
+fail closed の経路である)。v3 で次のように整理した。
+
+- **該当する行だけを載せる**(部分索引)。実行者が user の行は 65 万行中 30 行
+  しか無いのに、v1 の索引は 65 万行ぶんの大きさ(18MB)を持っていた
+- **一覧用の索引に置き換えたものは外す**(`idx_audit_at`、
+  `idx_audit_actor_machine`)
+- **DB を直接引く調査で、batch の後続行も含めて時刻や machine で引くときは、
+  先頭行から辿る。** 後続行の `at` と実行者は先頭行と同じなので、先頭行を
+  `idx_audit_head` / `idx_audit_head_machine` で引き、後続行を
+  `idx_audit_batch` で引けば、全行に張った索引が無くても全表を読まずに済む
+  (問い合わせの形は OPERATIONS §12.2)。v2 より前の行は batch を持たないので、
+  全て先頭行として載っている
+- **`idx_audit_target_item` は残す。** 使う問い合わせはコードに無いが、
+  侵害の調査で使う(「この key を誰が読んだか」)。key を対象にしない行は載せない
+- `DROP INDEX` はファイルを小さくしない(空いたページは DB の中で再利用される)。
+  `hokora backup` の出力は詰め直されるので、すぐ小さくなる
+- 実測(本番と同じ形の 67 万行、詰め直し後): v2 の 123MB が v3 で 94MB に
+  なる。表の本体(73MB)は変わらない
+- **索引を足すときは、それを使う問い合わせと、実行計画を固定するテストを
+  一緒に足す。** 「あると速そう」で全行に張らない。監査ログは増え続け、
+  索引もその分だけ増える
 
 **`batch_id`(bulk fetch の行をまとめる印):**
 
@@ -689,7 +724,8 @@ slug / key は再利用可能(THREAT_MODEL §11.2)なので、`target` 文字列
   (`(at DESC, id DESC) WHERE batch_id IS NULL`)。一覧が拾う行だけを、一覧の
   並び順どおりに持つ。machine と環境での絞り込みにも同じ形の索引がある
   (`idx_audit_head_machine` / `idx_audit_head_env`。bulk fetch を調べるときに
-  最も使う絞り込みである)。v1 の `idx_audit_at` は `(at DESC)` だけで同じ秒の中の
+  最も使う絞り込みである)。user と anonymous にも、該当する行だけの索引がある。
+  v1 の `idx_audit_at`(v3 で削除)は `(at DESC)` だけで同じ秒の中の
   並びを持たないため、操作や結果だけで絞ると SQLite は「表を全て読んでから
   並べ替える」計画を選び、batch の後続行(bulk fetch が多ければ行の大半)も
   表の行まで読んで捨てる。**索引を並び順に合わせ、SQL では索引を指定しない**

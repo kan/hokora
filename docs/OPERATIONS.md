@@ -115,9 +115,14 @@ ssh vps 'sudo -n systemctl start hokora'
   残る。そのときは古いバイナリに戻せば起動できる。
 - **移行後の DB は、古いバイナリでは開けない**（バイナリより新しい DB を拒否
   する）。戻すときは手順 1 のバックアップから復元する（§9.2）。
-- **移行にかかる時間は監査ログの行数に比例する**（v2 は `audit_logs` に
-  インデックスを 2 本足す。既存の行の内容は書き換えない）。止めている間は
+- **移行にかかる時間は監査ログの行数に比例する。** v2 は `audit_logs` に列を
+  1 つと索引を 4 本足し、v3 は索引を 4 本外して 3 本作り直す。v1 から上げる
+  ときは両方を続けて行う。既存の行の内容は書き換えない。止めている間は
   Machine API が応答しない。
+- **v3 で索引を外しても、DB のファイルはすぐには小さくならない。** 空いた
+  ページは DB の中で再利用され、その分だけファイルの伸びが止まる。対応は
+  要らない。`hokora backup` の出力は詰め直されるので、移行後に取った
+  バックアップはすぐ小さくなる。
 - 手順 4 を飛ばして起動すると、`database schema version is N, want M: run
   `hokora init`` で終了する。
 
@@ -650,9 +655,40 @@ ssh vps 'hokora gen-key' | op document create --title 'hokora master-key-new'
   数える。「古い方へ」「新しい方へ」で前後に移り、絞り込みは保たれる。
 - **key では絞り込めない。** 特定の key の読み取りを調べるときは、対象の環境と
   操作（`secret.read`）で絞り、まとまった行を開いて探す。件数が多いときは DB を
-  直接引く（`target_item_id` に索引がある）。
+  直接引く（§12.2）。
 - 操作や結果だけで絞ると、合う行がまれな場合に表示が遅くなることがある
   （索引を新しい順に端まで辿るため）。期間や実行者を併せて指定すると速くなる。
+
+### 12.2 DB を直接引くとき（侵害の調査）
+
+画面で足りないときは、**読み取り専用で** DB を引く（`hokora` ユーザーで、
+`file:/var/lib/hokora/hokora.db?mode=ro` として開く）。`audit_logs` に secret の
+値は入っていない。**直接引いた閲覧は、hokora の監査ログには残らない。**
+
+```sql
+-- この key を誰が、いつ読んだか(item の id は items 表で引く)
+SELECT datetime(at, 'unixepoch', 'localtime'), actor, action, result, remote_addr
+FROM audit_logs WHERE target_item_id = :item_id ORDER BY at DESC;
+
+-- ある期間の全行(まとめられた行の中身も含む)
+SELECT * FROM audit_logs
+WHERE id IN (SELECT id FROM audit_logs WHERE batch_id IS NULL AND at >= :from AND at < :to)
+   OR batch_id IN (SELECT id FROM audit_logs WHERE batch_id IS NULL AND at >= :from AND at < :to)
+ORDER BY id;
+
+-- ある machine の、ある時刻以降の全行
+SELECT * FROM audit_logs
+WHERE id IN (SELECT id FROM audit_logs WHERE batch_id IS NULL AND actor_machine_id = :machine_id AND at >= :from)
+   OR batch_id IN (SELECT id FROM audit_logs WHERE batch_id IS NULL AND actor_machine_id = :machine_id AND at >= :from)
+ORDER BY id;
+```
+
+- **`WHERE at >= ...` や `WHERE actor_machine_id = ...` だけで全行を引かない。**
+  schema v3 は、全行に張っていた時刻と machine の索引を外している（索引の合計が
+  表と同じ大きさになっていたため）。その形で引くと表を全て読む。上のように
+  **先頭の行（`batch_id IS NULL`）から辿る**と、索引だけで引ける。まとめられた
+  行（`batch_id` が先頭行の `id`）の時刻と実行者は、先頭行と同じである。
+- 時刻は Unix 秒である（`strftime('%s', '2026-10-01 00:00:00', 'utc')` などで作る）。
 
 ---
 

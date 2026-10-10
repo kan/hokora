@@ -114,7 +114,7 @@ func TestCmdInitMigrateOnly(t *testing.T) {
 			t.Fatalf("cmdInit: %v", err)
 		}
 		// v1 に戻した状態を作る代わりに、初期化済みの DB への再実行が通ることを
-		// 確かめる(移行そのものは TestMigrateV1ToV2... が見る)。
+		// 確かめる(移行そのものは TestMigrateFromV1... が見る)。
 		if err := cmdInit(t.Context(), []string{"-db", path, "-migrate-only"}); err != nil {
 			t.Fatalf("cmdInit --migrate-only on an existing database: %v", err)
 		}
@@ -167,11 +167,11 @@ func splitBatches(rows []auditBatchRow) (noBatch []int64, members map[int64][]in
 	return noBatch, members
 }
 
-// **v1 の DB を v2 に上げても、既存の監査行には触れない。**
+// **v1 の DB を現行の版に上げても、既存の監査行には触れない。**
 //
 // 監査ログは追記専用である(THREAT_MODEL §10.7)。v1 の bulk fetch の行を
 // 「同じ秒だから同じ呼び出し」と推測してまとめることはしない。
-func TestMigrateV1ToV2LeavesExistingAuditRowsUntouched(t *testing.T) {
+func TestMigrateFromV1LeavesExistingAuditRowsUntouched(t *testing.T) {
 	t.Parallel()
 
 	store := newV1Store(t)
@@ -189,7 +189,7 @@ func TestMigrateV1ToV2LeavesExistingAuditRowsUntouched(t *testing.T) {
 	before := queryStrings(t, db, snapshot)
 
 	if err := Migrate(t.Context(), db); err != nil {
-		t.Fatalf("Migrate v1 -> v2: %v", err)
+		t.Fatalf("Migrate from v1: %v", err)
 	}
 	assertUserVersion(t, db, schemaVersion)
 
@@ -199,6 +199,53 @@ func TestMigrateV1ToV2LeavesExistingAuditRowsUntouched(t *testing.T) {
 	noBatch, members := splitBatches(auditBatchRows(t, db, ""))
 	if len(noBatch) != 3 || len(members) != 0 {
 		t.Errorf("after migration: %d rows without a batch and batches %v, want 3 untouched rows and no batch", len(noBatch), members)
+	}
+}
+
+// **v2 の DB を v3 に上げても、監査行は 1 つも変わらない。** v3 は索引を
+// 入れ替えるだけで、行には触れない(監査ログは追記専用である)。
+// 上げた後も、行が書けて、一覧が引ける。
+func TestMigrateV2ToV3KeepsAuditRows(t *testing.T) {
+	t.Parallel()
+
+	store, err := openDatabase(t.Context(), filepath.Join(t.TempDir(), "hokora.db"))
+	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	db := store.DB()
+	if err := migrate(t.Context(), db, migrations[:2]); err != nil {
+		t.Fatalf("migrate to v2: %v", err)
+	}
+
+	now := time.Unix(1_700_000_000, 0)
+	if err := recordBatch(t, db, batchEntries(4, now)); err != nil {
+		t.Fatalf("RecordAuditBatch: %v", err)
+	}
+	if err := RecordAudit(t.Context(), db, socketAudit(now).entry(ActionSeal, ResultSuccess, nil)); err != nil {
+		t.Fatalf("RecordAudit: %v", err)
+	}
+	const snapshot = `SELECT group_concat(id || '|' || at || '|' || actor || '|' || action || '|' || result || '|' || COALESCE(batch_id, ''), ';') FROM audit_logs`
+	before := queryStrings(t, db, snapshot)
+
+	if err := Migrate(t.Context(), db); err != nil {
+		t.Fatalf("Migrate v2 -> v3: %v", err)
+	}
+	assertUserVersion(t, db, schemaVersion)
+	if after := queryStrings(t, db, snapshot); !slices.Equal(before, after) {
+		t.Errorf("audit rows changed during the migration:\nbefore: %v\nafter:  %v", before, after)
+	}
+
+	// 索引を入れ替えた後も、書き込みと一覧が動く。
+	if err := recordBatch(t, db, batchEntries(3, now.Add(time.Minute))); err != nil {
+		t.Fatalf("RecordAuditBatch after the migration: %v", err)
+	}
+	page, err := ListAuditLogs(t.Context(), db, AuditQuery{Limit: 10, Filter: AuditFilter{ActorAnonymous: true}})
+	if err != nil {
+		t.Fatalf("ListAuditLogs after the migration: %v", err)
+	}
+	if len(page.Rows) != 1 || page.Rows[0].Action != string(ActionSeal) {
+		t.Errorf("anonymous rows after the migration = %v, want the seal row", page.Rows)
 	}
 }
 
@@ -253,7 +300,7 @@ func TestMigrateFreshAndUpgradedSchemasMatch(t *testing.T) {
 
 	upgradedStore := newV1Store(t)
 	if err := Migrate(t.Context(), upgradedStore.DB()); err != nil {
-		t.Fatalf("Migrate v1 -> v2: %v", err)
+		t.Fatalf("Migrate from v1: %v", err)
 	}
 	upgraded := schemaShape(t, upgradedStore.DB())
 
@@ -262,9 +309,35 @@ func TestMigrateFreshAndUpgradedSchemasMatch(t *testing.T) {
 	}
 
 	// 「設定した」ではなく「在る」を確かめる。
-	for _, want := range []string{"column audit_logs.batch_id INTEGER", "index idx_audit_batch ", "index idx_audit_head ", "index idx_audit_head_machine ", "index idx_audit_head_env "} {
+	for _, want := range []string{
+		"column audit_logs.batch_id INTEGER",
+		"index idx_audit_batch ", "index idx_audit_head ", "index idx_audit_head_machine ", "index idx_audit_head_env ",
+		"index idx_audit_actor_user ", "index idx_audit_anonymous ",
+		// **key で引く索引は残す**(侵害の調査で DB を直接引くときに使う)。
+		"index idx_audit_target_item ",
+	} {
 		if !slices.ContainsFunc(fresh, func(s string) bool { return strings.HasPrefix(s, want) }) {
 			t.Errorf("audit_logs is missing %q; got %v", want, fresh)
+		}
+	}
+	// **v3 の索引は「該当する行だけ」を載せる部分索引である。** 名前が在ること
+	// だけを見ると、WHERE が落ちて全行の索引に戻っても気付けない(同じ名前の
+	// 索引は v1 にもあった)。v3 の目的は大きさを減らすことなので、条件を固定する。
+	for name, where := range map[string]string{
+		"idx_audit_actor_user":  "WHERE actor_user_id IS NOT NULL",
+		"idx_audit_anonymous":   "WHERE actor_user_id IS NULL AND actor_machine_id IS NULL",
+		"idx_audit_target_item": "WHERE target_item_id IS NOT NULL",
+	} {
+		if !slices.ContainsFunc(fresh, func(s string) bool {
+			return strings.HasPrefix(s, "index "+name+" ") && strings.Contains(s, where)
+		}) {
+			t.Errorf("%s is not a partial index with %q; got %v", name, where, fresh)
+		}
+	}
+	// v3 で外した索引が、新規の DB にも残っていないこと。
+	for _, gone := range []string{"index idx_audit_at ", "index idx_audit_actor_machine "} {
+		if slices.ContainsFunc(fresh, func(s string) bool { return strings.HasPrefix(s, gone) }) {
+			t.Errorf("audit_logs still has %q, which schema v3 drops", gone)
 		}
 	}
 }
@@ -599,10 +672,10 @@ func keyringAndUsers(t *testing.T, db *sql.DB) []string {
 	return append(keyring, users...)
 }
 
-// **--migrate-only は、運用中の v1 の DB ファイルを v2 に上げる。keyring と
+// **--migrate-only は、運用中の v1 の DB ファイルを現行の版に上げる。keyring と
 // admin は作り直さない。**
 //
-// 既存のテストは「初期化済み(v2)の DB への再実行が通る」ことしか見ていない。
+// 既存のテストは「初期化済み(現行の版)の DB への再実行が通る」ことしか見ていない。
 // 更新作業で実際に踏むのは、keyring・admin・監査行を持つ v1 のファイルである。
 // keyring を作り直せば新しい MK が出力され、既存の secret は復号できなくなる。
 func TestCmdInitMigrateOnlyUpgradesAV1DatabaseFile(t *testing.T) {
@@ -613,14 +686,25 @@ func TestCmdInitMigrateOnlyUpgradesAV1DatabaseFile(t *testing.T) {
 		t.Fatalf("cmdInit: %v", err)
 	}
 
-	// init 済みのファイルを v1 に戻す(v2 が足したものだけを外す)。
-	// keyring と admin は init が作った本物の行のまま残る。
+	// init 済みのファイルを v1 に戻す(v2 以降の移行が変えたものを、新しい順に
+	// 元へ戻す)。keyring と admin は init が作った本物の行のまま残る。
+	// **移行を足したら、その戻し方をここの先頭に足す**(足し忘れると、下の
+	// 「本物の v1 と同じ形か」の検査で落ちる)。
 	store, err := openDatabase(t.Context(), path)
 	if err != nil {
 		t.Fatalf("openDatabase: %v", err)
 	}
 	db := store.DB()
 	for _, stmt := range []string{
+		// 0003 を戻す(v1 の索引を、全行に張る元の形で作り直す)。
+		`DROP INDEX idx_audit_anonymous`,
+		`DROP INDEX idx_audit_actor_user`,
+		`DROP INDEX idx_audit_target_item`,
+		`CREATE INDEX idx_audit_target_item ON audit_logs(target_item_id, at DESC)`,
+		`CREATE INDEX idx_audit_at ON audit_logs(at DESC)`,
+		`CREATE INDEX idx_audit_actor_user ON audit_logs(actor_user_id, at DESC)`,
+		`CREATE INDEX idx_audit_actor_machine ON audit_logs(actor_machine_id, at DESC)`,
+		// 0002 を戻す。
 		`DROP INDEX idx_audit_batch`,
 		`DROP INDEX idx_audit_head`,
 		`DROP INDEX idx_audit_head_machine`,
@@ -715,6 +799,22 @@ func TestAuditBatchIndexesAreUsed(t *testing.T) {
 		// noSort が真なら、並べ替えも索引で済むこと(一時 B-tree を作らない)。
 		noSort bool
 	}{
+		// **侵害の調査で DB を直接引く問い合わせ。** 画面からは使わないので、
+		// ここで固定しておかないと、索引を整理したときに黙って全表スキャンになる。
+		{
+			name:   "who read this key, newest first",
+			query:  `SELECT id FROM audit_logs WHERE target_item_id = ? ORDER BY at DESC`,
+			index:  "idx_audit_target_item",
+			noSort: true,
+		},
+		{
+			// 期間の全行(batch の後続行を含む)。先頭行から辿る(0003 のコメント)。
+			name: "every row in a period, through the head rows",
+			query: `SELECT id FROM audit_logs
+				WHERE id IN (SELECT id FROM audit_logs WHERE batch_id IS NULL AND at >= ?1 AND at < ?1 + 3600)
+				   OR batch_id IN (SELECT id FROM audit_logs WHERE batch_id IS NULL AND at >= ?1 AND at < ?1 + 3600)`,
+			index: "idx_audit_head ",
+		},
 		{
 			name:  "members of a batch",
 			query: `SELECT id FROM audit_logs WHERE batch_id = ? ORDER BY id`,

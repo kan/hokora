@@ -14,6 +14,9 @@ var schemaSQL string
 //go:embed migrations/0002_audit_batch.sql
 var migration0002SQL string
 
+//go:embed migrations/0003_audit_indexes.sql
+var migration0003SQL string
+
 // migrations は、スキーマを 1 つ進める SQL を順に並べたものである。
 // migrations[i] はバージョン i の DB を i+1 にする。
 //
@@ -32,7 +35,8 @@ var migration0002SQL string
 // 定数にならない)。
 var migrations = [...]string{
 	schemaSQL,        // 0 → 1
-	migration0002SQL, // 1 → 2: audit_logs.batch_id と環境の絞り込み用インデックス
+	migration0002SQL, // 1 → 2: audit_logs.batch_id と一覧用の索引
+	migration0003SQL, // 2 → 3: audit_logs の使われなくなった索引を外す
 }
 
 // schemaVersion は本バイナリが期待するスキーマのバージョンである。

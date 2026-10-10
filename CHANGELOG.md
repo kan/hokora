@@ -27,10 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
-- **This release changes the database schema (schema v2). Run
+- **This release changes the database schema (schema v3). Run
   `hokora init --migrate-only` before starting the new binary.** `hokora serve`
   refuses a database whose schema version does not match (`database schema
-  version is 1, want 2`). On an existing database `init` applies only the
+  version is 1, want 3`). On an existing database `init` applies only the
   pending migration and prints no master key and no password. The new
   `--migrate-only` flag makes it fail instead of creating a fresh database when
   the path is wrong. Take a backup with the old binary first — the new binary
@@ -49,6 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment (disabled machines and deleted environments included), and paged
   50 / 100 / 200 at a time instead of showing only the latest 200 rows. Nothing
   about what is recorded changes: there is still one audit row per key.
+- **The audit log's indexes are rebuilt around the queries that use them, and
+  each audit write updates fewer of them.** On a production database (80 days,
+  650,000 rows) the four original indexes, each covering every row, were
+  together as large as the table itself. The audit list now reads small indexes
+  that hold only the rows it shows, so the full-table indexes on time and on
+  machine are dropped, and the per-user and per-key indexes now cover only the
+  rows they apply to. On production-shaped data this makes a compacted database
+  about a quarter smaller (123 MB → 94 MB for 670,000 rows; the table itself,
+  73 MB, is unchanged). Looking up who read a given key still has its index.
+  **If you query the database directly, read `docs/OPERATIONS.md` §12.2:** a
+  bare `WHERE at >= …` over all rows no longer has an index, and the section
+  shows the form that does. Dropping an index does not shrink the database file
+  (freed pages are reused); a `hokora backup` copy is compacted and shrinks at
+  once.
 - **Audit rows written by one bulk fetch are now marked as one batch**
   (`audit_logs.batch_id`, #22). A bulk fetch still writes one row per key; the
   mark only lets the audit screen show the call as a single line. Rows written
