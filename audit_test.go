@@ -156,7 +156,7 @@ func TestRecordAuditRejectsInvalidEntries(t *testing.T) {
 		}},
 		{"unknown via", AuditEntry{
 			At: at, Actor: ActorAnonymous, Action: ActionSeal, Result: ResultSuccess,
-			Detail: &AuditDetail{Via: ptr("cli")},
+			Detail: &AuditDetail{Via: ptr("ssh")},
 		}},
 		{"raw subject digest", AuditEntry{
 			At: at, Actor: ActorAnonymous, Action: ActionAuthMachine, Result: ResultFailure,
@@ -200,6 +200,7 @@ func TestAuditAllowlistAcceptsEveryDefinedAction(t *testing.T) {
 		ActionGrantCreate, ActionGrantDelete,
 		ActionProjectCreate, ActionProjectDelete,
 		ActionEnvironmentCreate, ActionEnvironmentDelete,
+		ActionAuditPrune,
 	}
 	if len(actions) != len(auditActions) {
 		t.Fatalf("allowlist has %d entries but the test covers %d", len(auditActions), len(actions))
@@ -316,7 +317,7 @@ func TestAuditCtxEntry(t *testing.T) {
 		reason := ReasonInvalidMasterKey
 		digest := subjectDigest("app-prod")
 		e := socketAudit(at).entry(ActionUnsealAttempt, ResultFailure, &AuditDetail{
-			Reason: &reason, SubjectDigest: &digest, Count: ptr(3),
+			Reason: &reason, SubjectDigest: &digest, Count: ptr(int64(3)),
 		})
 		switch {
 		case e.Detail.Reason == nil || *e.Detail.Reason != reason:

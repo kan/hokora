@@ -401,7 +401,7 @@ func (u *uiServer) handleUnseal(w http.ResponseWriter, r *http.Request, req uiRe
 	// **レート制限は socket と共有のグローバル制限である**(DESIGN §7.4)。
 	// 1 回ごとに argon2(64 MB)が走るので、連打で semaphore を占有され、
 	// 正規の unseal やログインが詰まる。監査も fail closed で毎回書かれるため、
-	// 削除できない監査テーブルを膨らませる口にもなる。
+	// 消せない監査行(unseal の試行は刈り込みの対象にならない)を増やす口にもなる。
 	if !u.unsealLimiter.Allow(globalKey, u.now()) {
 		u.renderStatus(w, r, http.StatusTooManyRequests, "unseal.html",
 			u.pageWithError(req, "unseal", "試行が多すぎます。しばらく待ってください"))

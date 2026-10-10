@@ -94,6 +94,8 @@
 | 別 module 化の作業中、gopls の警告を消すため `go.work` を置いたら、**`go list -m all` が workspace 全体を返し、追加したばかりの module graph テストが誤った対象を測って落ちた。** ビルドも全 module の require を MVS でまとめた build list を使う | **開発の便宜で入れた設定が、検査と成果物の意味を変えることがある。** 「エディタのため」に入れるものでも、go コマンドの解決規則を変えるなら影響を追う |
 | 外部レビュー(Codex)の「`ListEnvironments` が親 project の `deleted_at` を再検査していない(ルール 58)」という指摘どおりに直したら、**既存テストが逆の挙動(祖先検査は解決側の責務、行は残す)を意図として固定していた**ため落ちた | **外部レビューの指摘も鵜呑みにしない。** 直す前に、既存テストやコメントが逆を主張していないか見る。主張していたらまずその設計意図を確認し、指摘が既存の意図と衝突するなら「偽陽性」として扱う |
 | tools を別 module に分離したとき、`dependabot.yml` は `directory: /` のままにした。**Dependabot は指定した directory の go.mod しか見ないため、`tools/` の更新 PR は一度も来なくなり、** golangci-lint は 2.12.2 で止まった。`toolchain` 行も Dependabot は上げないので go1.26.6 のまま 1.26.9 と 1.27 系を見送り、定期の govulncheck が 12 件で赤くなるまで誰も気付かなかった | **構成を変えたら、その構成を見張っている仕組みの設定も一緒に動かす。** 「更新 PR が来ていない」は「最新である」を意味しない。検知の対象から外れたものは、静かに古くなる |
+| 時刻で全行を引く索引を外した(schema v3)直後に書いた刈り込みが、**対象の行が尽きると、書き込みロックを持ったまま表全体を読む**実装だった(446 万行で約 0.5 秒のロックが 2 回)。文書には「稼働中のサーバーを止めない」と書いていた。自分で書いた並行のテストは、残す行が 480 行しか無く、通っていた | **「待たせない」「止めない」は、小さなデータのテストでは検証されない。** 行数で効いてくる保証を書く前に、実行計画をテストで固定し、本番の大きさの表で測る。索引を外したら、その索引に暗に頼っていた問い合わせが他に無いかを探す |
+| 上の実行計画のテストを、**本体の SQL を手で写した文字列**に対して書いた。本体の問い合わせを変えても、古い写しのまま通る | **検査の対象が、本体が実際に使うものと同じかを確かめる。** 写しを検査するテストは、書いた時点の本体しか守らない。文面を定数にして、本体とテストで共有する |
 
 **この表は増える前提で書かれている。** 同種の誤りを見つけたら追記すること。
 
@@ -168,6 +170,7 @@
     - 認証(成功・失敗とも。監査 DB 障害時も必ず拒否)
     - 各種 create
     - `master.rotate`
+    - **`audit.prune`**(緊急の操作ではない。記録できなければ消さない)
 27. **fail open は「セキュリティを上げる操作」:**
     - **`seal`**
     - **`machine.disable` / `user.disable` / `grant.delete`**
@@ -178,7 +181,22 @@
     fail open の意味は「本体の処理が成功したのに監査 INSERT だけが失敗した場合、
     本体を rollback しない」であり、「DB 更新失敗を無視する」ではない。
     監査の失敗は非機密の運用ログに出す
-28. **監査ログの削除機能を実装しない**
+28. **監査ログを消す口は、オフラインの刈り込み(`hokora audit-prune`)だけである**
+    (THREAT_MODEL §10.7)。
+    - **Web UI / Machine API / admin socket に、監査ログを消す機能を実装しない**
+    - **刈り込みが消してよいのは、期間を過ぎた、実行者が machine の
+      `secret.read` の成功と `auth.machine` の成功だけである。** 失敗の行、
+      人の操作の行、`audit.prune` の行を消す実装をしてはならない。
+      **対象の条件は allowlist にする**(操作を足しても、条件に足さない限り
+      消えない)
+    - **既定値や自動実行で行を消さない。** `--keep-days` は必須で、下限は 30 日。
+      どこまで残すかは運用が決める。**下限は、消す関数が自分で検査する**
+      (コマンドの引数の検査だけに置かない)
+    - **記録してから消す。** `audit.prune` の行が書けなければ、1 行も消さない
+    - **監査行を UPDATE しない。** 追記と、上の刈り込みだけである
+    - **batch(`batch_id`)の途中で切らない**
+    - **刈り込みの問い合わせで、表全体を読まない。** 稼働中のサーバーの
+      書き込み(secret の読み取りの監査)を待たせる。実行計画をテストで固定する
 
 ### ネットワーク境界
 
@@ -245,10 +263,13 @@
 
 55. **`item_versions` を通常の操作系から UPDATE しない。** 追記のみ。
     **例外は `hokora rotate-dek`(Phase 3)のみ**
-56. **grant と session を除き、物理削除を実装しない。**
+56. **grant と session、および刈り込みの対象になる監査行を除き、物理削除を
+    実装しない。**
     - project / environment / item: `deleted_at`
     - **user / machine: `disabled`**(`deleted_at` を持たない)
     - **grant / session: 物理 DELETE を許可**(例外)
+    - **audit_logs: `hokora audit-prune` が、ルール 28 の範囲でだけ物理 DELETE
+      する**(例外)
 57. **外部キーは全て `ON DELETE RESTRICT`。** CASCADE を使わない。
     **`audit_logs` は FK を持たない**
 58. **すべての取得クエリで、全祖先の `deleted_at IS NULL` を検査する。**
@@ -304,7 +325,9 @@
 - **viewer ロール**(admin 単一)
 - **TLS 証明書の自動取得**(certbot、**別ホスト**に任せる)
 - **Machine API の version パラメータ**
-- **物理削除**(grant / session を除く)
+- **物理削除**(grant / session と、ルール 28 の監査行の刈り込みを除く)
+- **監査ログの自動削除、Web UI / API からの削除、刈り込む行の書き出し**
+  (残したいときは、刈り込みの前に `hokora backup` を取る)
 - **IP allowlist 機能**(firewalld の責務)
 - **`AuditDetail.UserAgent`**
 - **レスポンス圧縮**
@@ -455,13 +478,14 @@ hokora/
 ├── keyring.go           # MK/KEK/DEK、seal/unseal、並行制御(C1-C10)
 ├── mlock.go             # mlockall
 ├── store.go             # SQLite。DSN での PRAGMA 適用
-├── schema.sql           # embed
-├── migrate.go           # PRAGMA user_version
+├── schema.sql           # embed。**schema v1 の内容で、書き換えない**
+├── migrations/          # embed。v2 以降のスキーマ移行(NNNN_*.sql)。適用済みの SQL は書き換えない
+├── migrate.go           # PRAGMA user_version。移行を順に適用する
 ├── model.go             # 構造体、バリデーション
 ├── audit.go             # action allowlist、AuditDetail、fail open/closed
 ├── token.go             # tokenStore
 ├── server.go            # 3 つの mux、2 つの listener、TLS リロード
-├── api.go / admin.go / auth.go / session.go / ratelimit.go / ui.go
+├── api.go / admin.go / auth.go / session.go / ratelimit.go / ui.go / ui_audit.go
 ├── templates/           # embed
 ├── static/              # style.css, bfcache.js
 ├── cmd/hokora-client/   # クライアント専用バイナリ(get / run)。標準ライブラリ + sdk のみ

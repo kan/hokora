@@ -27,6 +27,9 @@ Server commands:
                   rotate the master key (current and new key are read from stdin)
   backup --out <path>
                   write an encrypted (ciphertext-only) backup; works online
+  audit-prune --keep-days <N>
+                  delete routine audit rows (successful machine reads and
+                  logins) older than N days; everything else is kept
 
 To fetch secrets from an application host, use the separate hokora-client
 binary (or import github.com/kan/hokora/sdk in Go apps).
@@ -63,6 +66,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdRotateMaster(ctx, rest)
 	case "backup":
 		return cmdBackup(ctx, rest)
+	case "audit-prune":
+		return cmdAuditPrune(ctx, rest)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil

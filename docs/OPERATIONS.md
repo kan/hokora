@@ -623,7 +623,9 @@ ssh vps 'hokora gen-key' | op document create --title 'hokora master-key-new'
 
 ## 12. 監査ログの見方（V4 は運用で実現する）
 
-- 監査ログは **削除できない**（削除機能を実装していない。AGENTS.md ルール 28）。
+- 監査ログは **Web UI からも API からも削除できない**（AGENTS.md ルール 28）。
+  消せるのは、期間を指定した刈り込み（§12.3）だけで、対象は machine の成功の
+  行に限られる。失敗と人の操作の行は、期間にかかわらず残る。
 - **`success` は「secret の送信を開始した」の意味**であって、「相手が確かに
   受け取った」ではない（THREAT_MODEL §10.5）。ネットワーク切断等で相手に
   届かなくても success になりうる。
@@ -689,6 +691,98 @@ ORDER BY id;
   **先頭の行（`batch_id IS NULL`）から辿る**と、索引だけで引ける。まとめられた
   行（`batch_id` が先頭行の `id`）の時刻と実行者は、先頭行と同じである。
 - 時刻は Unix 秒である（`strftime('%s', '2026-10-01 00:00:00', 'utc')` などで作る）。
+
+### 12.3 監査ログの刈り込み（`hokora audit-prune`）
+
+**hokora は、既定では監査ログを消さない。** 何もしなければ増え続ける。
+どこまで残すかは運用が決め、定期的に刈り込む。
+
+```bash
+# 何行消えるかを先に数える(何も変えない)
+ssh vps 'sudo -n -u hokora hokora audit-prune --keep-days 180 --dry-run'
+# 直近 180 日ぶんを残して刈り込む(稼働中に実行できる)
+ssh vps 'sudo -n -u hokora hokora audit-prune --keep-days 180'
+```
+
+**消えるもの、残るもの:**
+
+| 行 | 扱い |
+|---|---|
+| machine の読み取りの成功（`secret.read`）、machine の認証の成功（`auth.machine`） | `--keep-days` より古ければ消える |
+| 失敗（拒否された読み取り、認証の失敗、レート制限） | 残る |
+| 人の操作（reveal、secret の書き込みと削除、credential の再発行、grant、unseal / seal、ログイン、作成と削除） | 残る |
+| 刈り込みの記録（`audit.prune`） | 残る |
+
+**閾値（`--keep-days`）の決め方:**
+
+- **「侵害に気付くまでにかかりうる時間」より長くする。** 刈り込んだ期間に
+  ついては、「その secret が読まれたか」を確かめられなくなる。侵害の発見は
+  数か月遅れることがある。迷ったら長くする
+- **下限は 30 日**（それより短い指定はエラーになる）。上限は 36,500 日
+- 量の見積もりには `--dry-run` を使う。目安として、15 key を毎分 bulk fetch
+  する 1 台で、1 日に約 3 万行、約 6MB 増える（索引込み）
+- **バックアップの保持と合わせて決める。** 消した行は、それより前に取った
+  バックアップには残っている。つまり、バックアップを残している期間が、実質的な
+  監査ログの保持期間になる。長く残したい記録があるなら、刈り込みの前に
+  `hokora backup` を取り、そのファイルを保管する（§9.1。暗号文だが全 secret を
+  含むので、取り扱いは DB 本体と同じ）
+
+**定期実行（systemd timer の例）:**
+
+```ini
+# /etc/systemd/system/hokora-audit-prune.service
+[Unit]
+Description=prune old hokora audit rows
+
+[Service]
+Type=oneshot
+User=hokora
+Group=hokora
+ExecStart=/usr/local/bin/hokora audit-prune --keep-days 180
+```
+
+```ini
+# /etc/systemd/system/hokora-audit-prune.timer
+[Unit]
+Description=prune old hokora audit rows weekly
+
+[Timer]
+OnCalendar=Sun 04:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+- 日次のバックアップの後に回す（その日のバックアップに、消す前の行が入る）
+- 失敗は `systemctl status hokora-audit-prune` と journald で分かる。
+  **失敗しても secret の読み書きには影響しない**（監査ログが増え続けるだけである）
+
+**知っておくこと:**
+
+- **実行は監査に残る。** 始める前に 1 行（どの時刻より前を対象にしたか）、
+  終わった後に 1 行（消した行数）が `audit.prune` として入る。監査ログ画面で
+  操作を `audit.prune` に絞ると、いつ、どこまで消したかが分かる。途中で失敗した
+  ときは、終わりの行の結果が `failure` になり、そこまでに消した行数が入る。
+  始めた行だけがあって終わりの行が無ければ、プロセスごと止まっている。どちらの
+  場合も、もう一度実行すれば続きを消す
+- **DB のファイルは小さくならない。** 消した分は DB の中で再利用されるので、
+  定期的に回していれば、ファイルは「残す期間ぶん」の大きさで止まる。初回に
+  大量に消した直後も、ファイルの大きさは変わらない（以後しばらく伸びなくなる）
+- **稼働中のサーバーを止めずに実行できる。** 少しずつ消し、合間に書き込みを
+  譲る。1 回ぶんの処理は十数ミリ秒以下で、表が大きくなっても伸びない
+  （490 万行での実測で最大 12ms。DESIGN §10.4）。初回に大量に消すときは、
+  全体で数秒から数十秒かかる
+- **必ず `hokora` ユーザーで実行する**（`sudo -n -u hokora`）。DB ファイルの
+  所有者以外が実行するとエラーで終わる。root で DB を開くと、root 所有の
+  随伴ファイル（`-wal` / `-shm`）ができ、サーバーが監査を書けなくなることが
+  あるためである
+- **途中で止めてよい**（Ctrl-C、`systemctl stop`）。そこまでに消した行数を
+  記録して終わる。続きは次の実行で消える
+- ごく稀に、期間を過ぎているのにその回で消えない行がある（書き込みの順と時刻が
+  前後した行）。件数にも入らない。次の実行で消える
+- **Web UI にも API にも、監査ログを消す機能は無い。** 実行できるのは、DB
+  ファイルに届く OS ユーザー（`hokora`）だけである
 
 ---
 

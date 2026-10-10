@@ -569,7 +569,7 @@ CREATE TABLE item_versions (
     PRIMARY KEY (item_id, version)
 );
 
--- 監査ログ。追記専用
+-- 監査ログ。追記専用(行は書き換えない。消せるのは刈り込みだけ。§10.4)
 -- immutable ID を持つ(THREAT_MODEL §10.2)
 CREATE TABLE audit_logs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -681,7 +681,7 @@ slug / key は再利用可能(THREAT_MODEL §11.2)なので、`target` 文字列
 
 **監査ログ画面の一覧(絞り込みとページング):**
 
-保持は無限(§15 の Q4)なので、一覧は全件を描画しない。
+保持は既定で無限(Q4)なので、一覧は全件を描画しない。
 
 - **batch は 1 件として数え、先頭行に畳む。** 一覧は `batch_id IS NULL` の行
   (単独の行と batch の先頭行)だけを拾い、後続の行は先頭行の中に並べる
@@ -786,6 +786,8 @@ machine.create     machine.disable    machine.rotate_secret
 grant.create       grant.delete
 project.create     project.delete
 environment.create environment.delete
+session.csrf_reject
+audit.prune
 ```
 
 **`detail` は型付き構造体を marshal したもののみ。**
@@ -794,9 +796,10 @@ environment.create environment.delete
 type AuditDetail struct {
     Version        *int64  `json:"version,omitempty"`
     Reason         *string `json:"reason,omitempty"`  // 下記の定数のみ
-    Via            *string `json:"via,omitempty"`     // "socket" | "web"
-    Count          *int    `json:"count,omitempty"`
+    Via            *string `json:"via,omitempty"`     // "socket" | "web" | "cli"
+    Count          *int64  `json:"count,omitempty"`   // audit.prune が消した行数
     SubjectDigest  *string `json:"subject_digest,omitempty"`  // §5.5
+    Before         *int64  `json:"before,omitempty"`  // audit.prune の対象の上限(Unix 秒)
 }
 
 const (
@@ -1548,6 +1551,8 @@ hokora unseal --stdin
 hokora seal
 hokora status
 hokora rotate-master             # §6.7
+hokora backup --out <path>       # 暗号文のみのバックアップ(稼働中に取れる)
+hokora audit-prune --keep-days N # 古い監査行の刈り込み(§10.4)
 
 # クライアント側(アプリホストに置く別バイナリ hokora-client)
 hokora-client get KEY            # 単一 secret を stdout へ(端末確認用)
@@ -1585,6 +1590,90 @@ hokora-client run -- ./myapp     # 環境変数に展開(移行用)
 **`hokora-client get` の credential 経路:** `/etc/hokora/credentials` は
 root:0600 なので、人間が対話的に使う場合は `sudo hokora-client get` になる。
 日常的な確認は Web UI を使うことを推奨する(OPERATIONS.md)。
+
+### 10.4 `hokora audit-prune`(監査ログの刈り込み)
+
+何を消し、何を消さないか、なぜ持つかは THREAT_MODEL §10.7 にある。ここは
+コマンドの仕様である。
+
+```
+hokora audit-prune --keep-days <N> [--dry-run] [--db <path>]
+```
+
+- **直近 N 日ぶんを残し、それより古い「machine の成功」の行を消す**
+  (実行者が machine の、`secret.read` の成功と `auth.machine` の成功)。失敗、
+  人の操作、`audit.prune` の行は、期間にかかわらず消さない。**条件は
+  allowlist で、「実行者が machine であること」を含む**(操作の名前だけで
+  選ぶと、人や admin socket が同じ操作を記録するようになったときに、それも
+  消える)
+- **`--keep-days` は必須で、下限は 30 である。** 既定値を持たない(値を省いた
+  実行で行が消えることがあってはならない)。どこまで残すかは運用が決める。
+  **下限は、引数の検査だけでなく、消す関数も自分で検査する**
+- **`--dry-run` は数えるだけで、何も変えない**(監査にも残さない)。閾値を
+  決めるときに使う
+- **DB ファイルを直接操作する**(`hokora backup` と同じ)。サーバーのプロセスを
+  通らず、Web UI にも API にも admin socket にも、監査ログを消す口は無い。
+  稼働中に実行できる
+- **定期実行は hokora の外で行う**(systemd timer 等。OPERATIONS §12.3)。
+  hokora は自分では消さない
+
+**記録:**
+
+- 操作は `audit.prune`、actor は `anonymous`(DB ファイルに届く OS ユーザー、
+  としか言えない)、`detail.via` は `cli`
+- **始める前に 1 行**(`detail.before` = どの時刻より前を対象にしたか)、
+  **終わった後に 1 行**(`before` と、消した行数 `count`)を書く。2 行の時刻は、
+  それぞれ始めた時刻と終えた時刻である
+- **始める行が書けなければ、1 行も消さない**(fail closed)
+- **途中で失敗したときも、終わりの行を書く**(result は `failure`、`count` は
+  そこまでに消した行数)。終わりの行が無ければ、プロセスごと止まっている
+
+**消し方:**
+
+- **消してよい `id` の上限を、最初に 1 回だけ求める。** cutoff より前の、一番
+  新しい「一覧の行」(§5.2)を `idx_audit_head` で引き、それが batch の先頭行
+  なら最後の後続行までを上限にする。以後の問い合わせは、全て `id` の範囲で引く
+- **上限を先に決めるのは、表全体を読まないためである。** 時刻で全行を引く
+  索引は無い(v3 で外した)。上限が無いと、「対象の行はもう無い」と分かるまでに、
+  残す期間の行(半年ぶんなら数百万行)を全て読む。それを書き込みロックの中で
+  行うと、その間 secret の読み取りが待たされる(上限を持たない実装での実測:
+  446 万行で約 0.5 秒のロックが 2 回続き、並行する書き込みが 1 秒待った)。
+  **問い合わせが表全体を読まないことは、実行計画のテストで固定している**
+  (テストは、本体が発行する文面そのものを検査する)
+- **上限以下の行は、もう変わらない。** 新しい行は必ずそれより大きい `id` で
+  書かれ、監査行は書き換えない。だから、範囲を決める読み取りと削除の間に、
+  ロックを持ち続ける必要が無い
+- **少しずつ分けて消す**(1 回に約 2,000 行を読み進める)。SQLite の書き込みは
+  1 つずつなので、まとめて消すと、その間 secret の読み取り(監査の INSERT が
+  要る)が待たされる。削除の合間に書き込みを譲る
+- **区切りは、必ず「一覧の行」の直前に置く。** batch の行は `id` が連続し、
+  先頭行(`batch_id IS NULL`)から始まる。次の先頭行の手前で切れば、batch が
+  2 回に分かれることは無い
+- **1 回ぶんは DELETE 文 1 つで消す**(明示的なトランザクションを使わない)。
+  1 つの文は、全部が成功するか全部が失敗する。途中で止まっても、先頭行だけ、
+  または後続行だけが残ることが無い(残ると、監査ログ画面の件数と中身が合わなく
+  なる)。DELETE は自分で書き込みロックを取ってから読むので、deferred の
+  トランザクションで読んでから書くときの SQLITE_BUSY_SNAPSHOT も起きない
+- **消すものが無い範囲では、DELETE を発行しない**(書き込みロックを取らない)。
+  消えない行(失敗の行は未認証の試行で増やせる)が溜まった古い範囲を、
+  サーバーの書き込みを待たせずに通り抜ける
+- 実測(490 万行、うち 115 万行を削除、消えない古い行が 7 万行ある状態):
+  1 回ぶんの処理は中央値 6ms、最大 12ms(書き込みロックを持つのはその一部)。
+  全体で 4 秒。**1 回の長さは読み進める行数で決まり、表の行数には依らない。**
+  消すものが無い実行は 0.03 秒
+- 稀に、時刻は cutoff より前なのに `id` が上限を超える行がある(時刻は処理の
+  開始時に決まり、`id` は書き込みの順に決まる)。その回では消えず、件数にも
+  入らず、次の実行で消える。**期間内の行を巻き込まない側に倒してある**
+- **止められたら(SIGINT / SIGTERM)、そこまでに消した行数を記録して終わる。**
+  止める合図は削除の文の手前で受け、**削除の文そのものは取り消さない。** 文が
+  確定した直後に取り消されると、ドライバは「取り消された」を返し、消えた行の
+  数が分からなくなる(記録の件数が実際より少なくなる)
+- **DB ファイルの所有者以外には実行させない。** root で開くと、root 所有の
+  随伴ファイル(`-wal` / `-shm`)ができ、サーバーが監査を書けなくなりうる
+- `--keep-days` の上限は 36,500 である(日数を期間に直すときの桁あふれを防ぐ。
+  あふれた値は小さな正の期間に化けることがある)
+- **ファイルは詰め直さない。** 消した分のページは DB の中で再利用されるので、
+  定期的に刈り込めば、ファイルの大きさは「残す期間ぶん」で頭打ちになる
 
 ### 10.1 unseal の実行例
 
@@ -1850,6 +1939,6 @@ IAM Role により secret zero problem を解ける**という決定的な利点
 | Q1 | TLS 証明書 | **確定**: Let's Encrypt DNS-01、**certbot は別ホスト**、versioned dir + symlink、SIGHUP、失敗時は旧証明書を維持 |
 | Q2 | slug / key の文字種制限 | **確定**(M1): slug は `^[a-z0-9][a-z0-9-]{0,63}$`、key は `^[A-Z_][A-Z0-9_]{0,127}$`。slug は URL パスにそのまま載るため大文字・パス記号を排除し、key は環境変数名として展開されるため POSIX の変数名に収まる文字に限る。実装は `model.go` の `ValidateSlug` / `ValidateItemKey` |
 | Q3 | 初期 admin パスワード | **確定**: stdout に一度だけ表示、`must_change_pw`、**sealed でも変更可能**(§8.3) |
-| Q4 | 監査ログの保持期間 | **確定**: MVP では無限 |
+| Q4 | 監査ログの保持期間 | **確定**: 既定は無限。運用が `hokora audit-prune` で期間を決める(下限 30 日。消えるのは machine の成功の行だけ。THREAT_MODEL §10.7、§10.4) |
 | Q5 | MVP でのバックアップ手順 | **M6 で確定させる。** offline 手順。**`-wal` / `-shm` を含む全ファイルセットをコピーするか、停止後に WAL が消えていることを確認する。** 復元テストを完了条件に含める |
 | Q6 | Web UI の DNS レコード | **M6 で確定させる。** 公開 DNS の `hokora.example.com` は Machine API の public IP。Web UI 用に VPN 内 IP を指す別レコード。**内部 IP が公開 DNS に載る軽微な情報漏れを受容することを明記** |

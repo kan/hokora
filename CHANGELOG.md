@@ -38,6 +38,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be opened by an older binary. The full procedure is in `docs/OPERATIONS.md`
   §1.3.
 
+### Added
+
+- **`hokora audit-prune --keep-days N` deletes routine audit rows older than N
+  days** (#27). Until now the audit log could only grow: a client that fetches
+  every key each time it starts, run every minute, adds over 30,000 rows a day,
+  and on one production database the audit log had become nearly the whole
+  database within 80 days. What is pruned is deliberately narrow — **only
+  successful machine reads (`secret.read`) and successful machine logins
+  (`auth.machine`)**, which were 99.9% of the rows measured. Failures, every
+  human action (reveals, writes, credential rotation, grants, unseal, logins)
+  and the prune records themselves are kept regardless of age.
+  - **Nothing is pruned by default.** `--keep-days` is required and must be at
+    least 30; how long to keep is an operational decision. `--dry-run` counts
+    without changing anything. Run it from a timer, as the user that owns the
+    database file (it refuses to run as anyone else, root included); hokora
+    never prunes on its own (`docs/OPERATIONS.md` §12.3).
+  - **There is still no way to delete audit rows from the Web UI or the API.**
+    The command works on the database file, so only an OS user who can already
+    rewrite that file can run it. Each run records itself as `audit.prune`
+    (what cutoff, how many rows) before it deletes anything, and stops if that
+    record cannot be written.
+  - **The trade-off:** for the pruned period you can no longer check whether a
+    secret was read. Keep at least as long as a compromise could go unnoticed;
+    rows pruned from the database remain in backups taken earlier
+    (`docs/THREAT_MODEL.md` §10.7, R17).
+  - The database file does not shrink; freed pages are reused, so with regular
+    pruning the file levels off at the size of the retained period.
+
 ### Changed
 
 - **The audit log screen folds a bulk fetch into one line, and can be filtered

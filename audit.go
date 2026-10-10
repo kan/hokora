@@ -50,6 +50,11 @@ const (
 
 	ActionEnvironmentCreate Action = "environment.create"
 	ActionEnvironmentDelete Action = "environment.delete"
+
+	// ActionAuditPrune は、古い監査行の刈り込み(`hokora audit-prune`)を記録する。
+	// **この行は刈り込みの対象にならない**(cmd_audit_prune.go)。何がいつまで
+	// 消されたかの記録は、消された行より長く残らなければならない。
+	ActionAuditPrune Action = "audit.prune"
 )
 
 // auditActions は記録を許す action の集合である(DESIGN §5.4)。
@@ -62,6 +67,7 @@ var auditActions = map[Action]struct{}{
 	ActionGrantCreate: {}, ActionGrantDelete: {},
 	ActionProjectCreate: {}, ActionProjectDelete: {},
 	ActionEnvironmentCreate: {}, ActionEnvironmentDelete: {},
+	ActionAuditPrune: {},
 }
 
 // Result は監査ログの result である。
@@ -79,8 +85,8 @@ const (
 // 自由記述にすると、失敗理由の説明という体裁で攻撃者制御の文字列が入る。
 //
 // **sealed 状態の認証(503)とトークン/セッションの期限切れ(401)は、意図的に
-// 監査しない。** どちらも未認証で高頻度に到達しうる経路で、記録すると削除でき
-// ない監査テーブルを未認証トラフィックだけで膨らませられる(api.go の
+// 監査しない。** どちらも未認証で高頻度に到達しうる経路で、記録すると、消せない
+// 行(失敗の行は刈り込みの対象にならない)を未認証トラフィックだけで増やせる(api.go の
 // authorize / handleAuthToken のコメント参照)。そのため対応する reason 定数
 // (かつて存在した "sealed" / "expired")は持たない。**定義したのに使わない
 // 定数を残さない**(AGENTS.md の教訓)。
@@ -104,6 +110,9 @@ var auditReasons = map[string]struct{}{
 const (
 	ViaSocket = "socket"
 	ViaWeb    = "web"
+	// ViaCLI は、DB ファイルを直接操作するコマンド(`hokora audit-prune`)である。
+	// サーバーのプロセスを通らない。
+	ViaCLI = "cli"
 )
 
 // ActorAnonymous は認証されていない主体である。
@@ -122,8 +131,11 @@ type AuditDetail struct {
 	Version       *int64  `json:"version,omitempty"`
 	Reason        *string `json:"reason,omitempty"`
 	Via           *string `json:"via,omitempty"`
-	Count         *int    `json:"count,omitempty"`
+	Count         *int64  `json:"count,omitempty"`
 	SubjectDigest *string `json:"subject_digest,omitempty"`
+	// Before は audit.prune が「この時刻より前の行を対象にした」ことを表す
+	// Unix 秒である。
+	Before *int64 `json:"before,omitempty"`
 }
 
 // AuditEntry は監査ログの 1 行である。
@@ -188,6 +200,14 @@ type auditCtx struct {
 // 持たない(unix socket に送信元アドレスは無い)。
 func socketAudit(now time.Time) auditCtx {
 	return auditCtx{Actor: ActorAnonymous, Via: ViaSocket, Now: now}
+}
+
+// cliAudit は、DB ファイルを直接操作するコマンドの監査コンテキストである。
+//
+// socket と同じく、**実行したのが誰かまでは分からない**(DB ファイルに届く
+// OS ユーザーである、としか言えない)。actor は anonymous で、remote_addr は無い。
+func cliAudit(now time.Time) auditCtx {
+	return auditCtx{Actor: ActorAnonymous, Via: ViaCLI, Now: now}
 }
 
 // remoteAddr は送信元アドレスを返す(未設定なら空文字)。
@@ -391,7 +411,7 @@ func (d *AuditDetail) validate() error {
 			return fmt.Errorf("audit: reason %q is not in the allowlist", *d.Reason)
 		}
 	}
-	if d.Via != nil && *d.Via != ViaSocket && *d.Via != ViaWeb {
+	if d.Via != nil && *d.Via != ViaSocket && *d.Via != ViaWeb && *d.Via != ViaCLI {
 		return fmt.Errorf("audit: via %q is not valid", *d.Via)
 	}
 	// subject_digest は subjectDigest() が作る 16 文字の hex に限る。
