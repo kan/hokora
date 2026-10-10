@@ -47,9 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hokora-client`), and a command reference. The existing design and operations
   documents are published on the same site. The sources are `docs/index.md` and
   `docs/manual/`; procedures stay in `docs/OPERATIONS.md` and the manual links
-  to them. `make docs-check` (part of `make all` and CI) rejects Liquid syntax
-  in `docs/*.md`, which Jekyll would otherwise silently drop from the published
-  page.
+  to them. **The Web UI's top bar links to the manual**, on the login page too
+  (first login and unseal are when it is needed). The link opens a new tab with
+  `rel="noreferrer"`, on top of the `Referrer-Policy: no-referrer` every Web UI
+  response already carries, so the Web UI's URL is not sent to the external
+  site. The link always shows the manual for the latest `master`, not for the
+  running binary's version. `make docs-check` (part of `make all` and CI)
+  rejects Liquid syntax in `docs/*.md`, which Jekyll would otherwise silently
+  drop from the published page.
 - **The per-credential limit on `POST /v1/auth/token` can be raised for one
   machine** (#28). The limit was a constant: 10 authentications a minute per
   `client_id`, successes included. An application that authenticates every time

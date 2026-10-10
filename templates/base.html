@@ -22,7 +22,14 @@
     <a href="/ui/users">ユーザー</a>
     <a href="/ui/audit">監査ログ</a>
   </nav>
+  {{end}}
   <span class="spacer"></span>
+  {{/* マニュアルは外部(GitHub Pages)にある。ログイン前にも出す(初回の
+       ログインと unseal で読むため)。遷移先に Web UI の URL(内部のホスト名、
+       project の slug)を渡さない。全レスポンスの Referrer-Policy: no-referrer
+       (render.go)に加えて、リンクにも noreferrer を付ける。 */}}
+  <a href="https://kan.github.io/hokora/" target="_blank" rel="noreferrer noopener">マニュアル</a>
+  {{if .User}}
   {{if .Sealed}}<a class="state sealed" href="/ui/unseal">sealed</a>{{else}}<span class="state">unsealed</span>{{end}}
   <span class="who">{{.User.Username}}</span>
   <form method="post" action="/ui/logout" class="inline">

@@ -140,6 +140,63 @@ func TestParseTemplatesRendersEachPageIndependently(t *testing.T) {
 	}
 }
 
+// manualLink は base.html が全ページに出す、マニュアルへのリンクである。
+//
+// **`rel="noreferrer"` まで含めて固定する。** 遷移先は外部(GitHub Pages)で、
+// Web UI の URL には内部のホスト名と project の slug が載る。
+const manualLink = `<a href="https://kan.github.io/hokora/" target="_blank" rel="noreferrer noopener">マニュアル</a>`
+
+// **マニュアルへのリンクは、ログイン前のページにも出る。**
+//
+// 初回のログインと unseal で読むためのリンクなので、ナビゲーション
+// (ログイン後だけ出る)の中に入れると、最も要る場面で出ない。
+func TestManualLinkIsRenderedOnEveryPage(t *testing.T) {
+	t.Parallel()
+
+	tmpl, err := parseTemplates()
+	if err != nil {
+		t.Fatalf("parseTemplates: %v", err)
+	}
+	u := &uiServer{tmpl: tmpl, logger: discardLogger()}
+
+	// リンクは base.html にしか無いので、ログインの有無ごとに 1 ページずつ
+	// 描けば足りる。User が nil のページは、ログイン前に描かれるものである。
+	loggedOut := pageData{Title: "テスト", BFCache: "reload"}
+	tests := []struct {
+		name    string
+		page    string
+		data    pageData
+		wantNav bool // ナビゲーションとログアウトのフォームが出るか
+	}{
+		{"logged in", "dashboard.html", fullPageData(), true},
+		{"logged out login", "login.html", loggedOut, false},
+		{"logged out error", "error.html", loggedOut, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			w := httptest.NewRecorder()
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/ui/", nil)
+			u.renderStatus(w, r, http.StatusOK, tt.page, tt.data)
+			if w.Code != http.StatusOK {
+				t.Fatalf("render %s = %d (body %q)", tt.page, w.Code, w.Body.String())
+			}
+			body := w.Body.String()
+
+			if n := strings.Count(body, manualLink); n != 1 {
+				t.Errorf("%s contains the manual link %d times, want 1", tt.page, n)
+			}
+			if got := strings.Contains(body, `action="/ui/logout"`); got != tt.wantNav {
+				t.Errorf("%s: logout form rendered = %v, want %v", tt.page, got, tt.wantNav)
+			}
+			if got := strings.Contains(body, `href="/ui/audit"`); got != tt.wantNav {
+				t.Errorf("%s: navigation rendered = %v, want %v", tt.page, got, tt.wantNav)
+			}
+		})
+	}
+}
+
 // **テンプレートの自動エスケープに委ねる**(AGENTS.md ルール 40)。
 //
 // secret の平文は攻撃者が値を決められる場所である(machine が書ける)。

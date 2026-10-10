@@ -390,6 +390,95 @@ func TestUISealedRedirectsToUnseal(t *testing.T) {
 	}
 }
 
+// **上部のバーは、実際の mux を通しても欠けず、重複もしない。**
+//
+// TestManualLinkIsRenderedOnEveryPage はテンプレートを直接描いている。
+// ハンドラが pageData に何を詰めるか(User、Sealed、CSRFToken)は、そこでは
+// 見えない。base.html の `{{if .User}}` を 2 つに割ったので、ログインの有無と
+// seal の状態ごとに、各部品がちょうど 1 回ずつ出ることを外から確かめる。
+func TestUITopBarThroughTheMux(t *testing.T) {
+	t.Parallel()
+
+	const (
+		nav        = "<nav>"
+		logout     = `action="/ui/logout"`
+		who        = `<span class="who">` + testUsername + `</span>`
+		sealedTag  = `<a class="state sealed" href="/ui/unseal">sealed</a>`
+		unsealedAs = `<span class="state">unsealed</span>`
+	)
+
+	tests := []struct {
+		name        string
+		path        string
+		unseal      bool
+		withSession bool
+		want        map[string]int
+	}{
+		{
+			// **ログイン前。** リンクだけが出て、ログイン後の部品は 1 つも出ない。
+			name: "logged out login page", path: "/ui/login",
+			want: map[string]int{manualLink: 1, nav: 0, logout: 0, who: 0, sealedTag: 0, unsealedAs: 0},
+		},
+		{
+			// sealed のまま開ける画面。unseal の手順を読むためのリンクが要る場面である。
+			name: "logged in while sealed", path: "/ui/unseal", withSession: true,
+			want: map[string]int{manualLink: 1, nav: 1, logout: 1, who: 1, sealedTag: 1, unsealedAs: 0},
+		},
+		{
+			name: "logged in and unsealed", path: "/ui/", unseal: true, withSession: true,
+			want: map[string]int{manualLink: 1, nav: 1, logout: 1, who: 1, sealedTag: 0, unsealedAs: 1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newUIFixture(t)
+			if tt.unseal {
+				f.unseal(t)
+			}
+
+			w := f.do(t, http.MethodGet, tt.path, nil, tt.withSession)
+			if w.Code != http.StatusOK {
+				t.Fatalf("%s = %d, want 200 (body %q)", tt.path, w.Code, w.Body.String())
+			}
+			body := w.Body.String()
+
+			for part, want := range tt.want {
+				if got := strings.Count(body, part); got != want {
+					t.Errorf("%s contains %q %d times, want %d", tt.path, part, got, want)
+				}
+			}
+			if !tt.withSession {
+				return
+			}
+
+			// **並びも固定する。** ナビゲーション → リンク → 状態 → ログアウトの順で、
+			// 割った 2 つのブロックが入れ替わっていないこと。
+			order := []string{nav, manualLink, `class="state`, who, logout}
+			pos := -1
+			for _, part := range order {
+				i := strings.Index(body, part)
+				if i <= pos {
+					t.Fatalf("%s: %q is at %d, want it after %d (order %q)", tt.path, part, i, pos, order)
+				}
+				pos = i
+			}
+
+			// **ログアウトのフォームに CSRF トークンが入っている**(ルール 47)。
+			// 割ったあとのブロックでも `.CSRFToken` が届いていること。
+			_, rest, _ := strings.Cut(body, logout)
+			form, _, closed := strings.Cut(rest, "</form>")
+			if !closed {
+				t.Fatalf("%s: the logout form is not closed", tt.path)
+			}
+			if want := `name="csrf_token" value="` + f.csrf + `"`; !strings.Contains(form, want) {
+				t.Errorf("%s: the logout form does not carry the CSRF token: %q", tt.path, form)
+			}
+		})
+	}
+}
+
 // **Web UI から unseal できる**(M5 完了条件)。
 func TestUIUnseal(t *testing.T) {
 	t.Parallel()
