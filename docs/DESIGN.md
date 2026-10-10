@@ -1990,5 +1990,5 @@ IAM Role により secret zero problem を解ける**という決定的な利点
 | Q2 | slug / key の文字種制限 | **確定**(M1): slug は `^[a-z0-9][a-z0-9-]{0,63}$`、key は `^[A-Z_][A-Z0-9_]{0,127}$`。slug は URL パスにそのまま載るため大文字・パス記号を排除し、key は環境変数名として展開されるため POSIX の変数名に収まる文字に限る。実装は `model.go` の `ValidateSlug` / `ValidateItemKey` |
 | Q3 | 初期 admin パスワード | **確定**: stdout に一度だけ表示、`must_change_pw`、**sealed でも変更可能**(§8.3) |
 | Q4 | 監査ログの保持期間 | **確定**: 既定は無限。運用が `hokora audit-prune` で期間を決める(下限 30 日。消えるのは machine の成功の行だけ。THREAT_MODEL §10.7、§10.4) |
-| Q5 | MVP でのバックアップ手順 | **M6 で確定させる。** offline 手順。**`-wal` / `-shm` を含む全ファイルセットをコピーするか、停止後に WAL が消えていることを確認する。** 復元テストを完了条件に含める |
-| Q6 | Web UI の DNS レコード | **M6 で確定させる。** 公開 DNS の `hokora.example.com` は Machine API の public IP。Web UI 用に VPN 内 IP を指す別レコード。**内部 IP が公開 DNS に載る軽微な情報漏れを受容することを明記** |
+| Q5 | MVP でのバックアップ手順 | **確定**(M6): online は `hokora backup`(`VACUUM INTO`。稼働中でも sealed でも取れる)。停止を伴う offline 手順はフォールバックで、**`-wal` / `-shm` を含む全ファイルセットをコピーするか、停止後に WAL が消えていることを確認する。** 復元テストを必須とする(OPERATIONS §9) |
+| Q6 | Web UI の DNS レコード | **確定**(M6、OPERATIONS §6): 公開 DNS の `hokora.example.com` は Machine API の public IP。Web UI 用に VPN 内 IP を指す別レコード。**内部 IP が公開 DNS に載る軽微な情報漏れを受容することを明記** |
