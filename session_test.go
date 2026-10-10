@@ -71,12 +71,21 @@ func newTestUserNamed(t *testing.T, store *Store, username string) int64 {
 // 等が別途見ている。
 func newTestSession(t *testing.T, store *Store, userID int64) []byte {
 	t.Helper()
+	return newTestSessionAt(t, store, userID, vaultNow)
+}
+
+// newTestSessionAt は、作成時刻を指定してセッション行を作る。
+//
+// 時計を vaultNow から動かすテストでは、vaultNow で作ったセッションが
+// 期限切れになるので、こちらを使う。
+func newTestSessionAt(t *testing.T, store *Store, userID int64, at time.Time) []byte {
+	t.Helper()
 
 	raw, _, err := GenerateSessionToken()
 	if err != nil {
 		t.Fatalf("GenerateSessionToken: %v", err)
 	}
-	if err := createSession(t.Context(), store.DB(), userID, raw, "10.8.0.9", vaultNow); err != nil {
+	if err := createSession(t.Context(), store.DB(), userID, raw, "10.8.0.9", at); err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 	return raw

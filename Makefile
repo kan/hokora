@@ -15,7 +15,7 @@ SUBMODULES := tools/go.mod sdk/go.mod
 MODULES := . sdk
 
 .PHONY: all build build-client test vet fmt fmt-check lint vuln tidy clean \
-        toolchain-check toolchain-latest docs-check
+        toolchain-check toolchain-latest docs-check docs-screenshots
 
 all: toolchain-check fmt-check docs-check vet lint test build
 
@@ -30,6 +30,25 @@ docs-check:
 		echo "docs/ の Markdown に Liquid として解釈される記法がある (GitHub Pages で消えるか、ビルドが落ちる):"; \
 		echo "$$out"; exit 1; \
 	fi
+	@# 同梱した mermaid(12.1.0、npm の mermaid パッケージの dist/mermaid.min.js)が、
+	@# 置いた時点から変わっていないこと。**見るのは取り違えや破損だけである。**
+	@# 配布元のものと同じであること、最新であることは見ていない。
+	@cd docs/assets/vendor && sha256sum --check --quiet mermaid.min.js.sha256
+
+# マニュアルに載せる Web UI のスクリーンショット(docs/assets/screenshots/)を
+# 撮り直す。撮るのは、テストが使い捨ての DB に入れた架空のデータだけである
+# (docs_screenshots_test.go)。Chromium か Chrome が要る:
+#
+#   make docs-screenshots HOKORA_CHROME=/usr/bin/chromium
+#
+# templates/ か static/ を変えたら撮り直して、同じコミットに入れる。
+# `make all` には含めない(ブラウザが要るうえ、撮るたびに credential の値が
+# 変わって画像に差分が出るため)。画像と文書からの参照がそろっていること、
+# 撮影した時点から画面の素(templates/、static/)が変わっていないことは、
+# 通常の `make test` が見る。
+docs-screenshots:
+	HOKORA_SCREENSHOT_DIR="$(CURDIR)/docs/assets/screenshots" HOKORA_CHROME="$(HOKORA_CHROME)" \
+		$(GO) test -run '^TestDocsScreenshots$$' -count=1 -v .
 
 # go.mod の `toolchain` 行と、実際に走っている処理系の版が一致することを
 # 確かめる。`go` 行は minor までの宣言であって patch を含まないため、

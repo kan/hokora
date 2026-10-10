@@ -81,7 +81,7 @@ credential ファイルの場所は、SDK と `hokora-client` で既定が違い
 
 ## Go SDK
 
-```
+```bash
 go get github.com/kan/hokora/sdk
 ```
 

@@ -480,52 +480,38 @@ N1 を非目標としている以上、ディスクに MK を置く方式は
 
 ## 7. 信頼境界
 
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 320}}}%%
+flowchart TB
+    subgraph vpn["VPN"]
+        pc["管理者の PC<br>1Password<br>(MK を保持)"]
+        ans["Ansible 管理ホスト<br>certbot<br>(DNS-01 の API 認証情報)"]
+        subgraph hk["hokora サーバー"]
+            ui[":8443 Web UI<br>VPN IF のみ bind<br>(uiMux)"]
+            adm["admin.sock<br>0600、adminMux"]
+            proc["プロセス<br>ユーザー: hokora(非 root)<br>mlockall / LimitCORE=0<br>kdump 無効<br>coredump 無効<br>メモリ: DEK のみ"]
+            db[("SQLite<br>secret は暗号化済")]
+            nodns["DNS API 認証情報:<br>なし"]
+            api[":9443 Machine API<br>(machineMux)"]
+            ui ~~~ proc ~~~ api
+            adm ~~~ db ~~~ nodns
+        end
+    end
+    subgraph app["アプリケーションサーバー(hokora の管理外。§5.4)"]
+        aproc["アプリプロセス(非 root)<br>メモリ上に secret<br>(N4 で受容)<br>swap / core / kdump<br>(N5 で受容)"]
+        credir["$CREDENTIALS_DIRECTORY/hokora<br>T1-a でも読める<br>(N2 で受容)"]
+        cred["/etc/hokora/credentials<br>0600 root:root<br>T1 は読めない"]
+        noconf["平文の設定ファイル: なし<br>これが V1<br>(SDK 方式の場合)"]
+        aproc ~~~ cred
+        credir ~~~ noconf
+    end
+    pc -- "SSH / HTTPS" --> hk
+    ans -- "証明書・秘密鍵のみ" --> hk
+    api ~~~ app
+    app -- "firewalld で allowlist" --> api
 ```
-┌──────────────────────────────────────────────────────────┐
-│ VPN                                                       │
-│                                                           │
-│  ┌──────────────┐        ┌────────────────────┐          │
-│  │ 管理者の PC   │        │ Ansible 管理ホスト  │          │
-│  │ 1Password    │        │ certbot            │          │
-│  │  └ MK        │        │  └ DNS-01 API 認証 │          │
-│  └──────┬───────┘        └─────────┬──────────┘          │
-│         │ SSH / HTTPS              │ 証明書・秘密鍵のみ    │
-│         ▼                          ▼                      │
-│  ┌─────────────────────────────────────┐                  │
-│  │ hokora サーバー                      │                  │
-│  │  ユーザー: hokora (非 root)          │                  │
-│  │  mlockall / LimitCORE=0              │                  │
-│  │  kdump 無効 / coredump 無効          │                  │
-│  │                                     │                  │
-│  │  :8443 ← VPN IF のみ bind (uiMux)   │                  │
-│  │  admin.sock (0600, adminMux)         │                  │
-│  │                                     │                  │
-│  │  SQLite (secret は暗号化済)          │                  │
-│  │  メモリ: DEK のみ                    │                  │
-│  │  DNS API 認証情報: なし              │                  │
-│  └─────────────────┬───────────────────┘                  │
-└────────────────────┼──────────────────────────────────────┘
-                     │
-      :9443 ← machineMux、firewalld で allowlist
-                     ▼
-      ┌──────────────────────────────────────┐
-      │ アプリケーションサーバー                │
-      │  (hokora の管理外。§5.4)              │
-      │                                      │
-      │  /etc/hokora/credentials             │
-      │    0600 root:root → T1 は読めない     │
-      │                                      │
-      │  $CREDENTIALS_DIRECTORY/hokora       │
-      │    → T1-a でも読める(N2 で受容)     │
-      │                                      │
-      │  アプリプロセス(非 root)              │
-      │    → メモリ上に secret(N4 で受容)   │
-      │    → swap/core/kdump(N5 で受容)     │
-      │                                      │
-      │  平文の設定ファイル: なし              │
-      │    → これが V1(SDK 方式の場合)      │
-      └──────────────────────────────────────┘
-```
+
+矢印は、接続を始める側から受ける側へ引いてある。
 
 ### 7.1 境界の定義
 
@@ -550,11 +536,15 @@ N1 を非目標としている以上、ディスクに MK を置く方式は
 
 ### 8.1 Envelope Encryption
 
-```
-MK      … 人間が 1Password で保持。ディスクに存在しない
-  └─ KDF ─▶ KEK   … unseal 時のみメモリ。DEK 復号後すぐゼロクリア
-              └─ 暗号化 ─▶ DEK   … DB に暗号化された状態で保存
-                            └─ 暗号化 ─▶ Secret 値
+```mermaid
+flowchart LR
+    mk["MK<br>人間が 1Password で保持。<br>ディスクに存在しない"]
+    kek["KEK<br>unseal 時のみメモリ。<br>DEK 復号後すぐゼロクリア"]
+    dek["DEK<br>DB に暗号化された<br>状態で保存"]
+    val["Secret 値"]
+    mk -- "KDF" --> kek
+    kek -- "暗号化" --> dek
+    dek -- "暗号化" --> val
 ```
 
 ### 8.2 何を暗号化し、何を暗号化しないか
@@ -574,12 +564,12 @@ MK      … 人間が 1Password で保持。ディスクに存在しない
 
 ## 9. Seal / Unseal の状態遷移
 
-```
-   起動 → ┌────────┐  正しい MK 投入   ┌──────────┐
-          │ SEALED │ ─────────────────▶│ UNSEALED │
-          └────────┘                    └──────────┘
-              ▲          seal 操作           │
-              └──────────────────────────────┘
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> SEALED: 起動
+    SEALED --> UNSEALED: 正しい MK 投入
+    UNSEALED --> SEALED: seal 操作
 ```
 
 ### 9.1 SEALED 状態での挙動

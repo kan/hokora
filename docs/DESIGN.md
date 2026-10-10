@@ -1593,7 +1593,7 @@ VPN 内の管理者ブラウザ前提なので受容するが、OPERATIONS.md �
 
 ## 10. CLI
 
-```
+```bash
 hokora init                      # DB 初期化、MK 生成、初期 admin 作成
 hokora gen-key                   # 新しい MK を生成して表示(DB に触らない)
 hokora serve                     # サーバー起動(sealed 状態で起動)

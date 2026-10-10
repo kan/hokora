@@ -1,0 +1,9 @@
+# ハッシュを記録して突き合わせているファイルは、チェックアウト時に改行を
+# 変換させない(core.autocrlf が有効な環境で、何も変えていないのに検査が落ちる)。
+#
+# - templates/、static/: docs/assets/screenshots/sources.sha256 (docs_screenshots_test.go)
+# - docs/assets/vendor/: mermaid.min.js.sha256 (make docs-check)
+templates/** text eol=lf
+static/** text eol=lf
+docs/assets/vendor/** -text
+docs/assets/screenshots/sources.sha256 text eol=lf

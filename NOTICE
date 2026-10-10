@@ -20,6 +20,12 @@ standard library.
   golang.org/x/crypto           BSD-3-Clause
   golang.org/x/sys              BSD-3-Clause
 
+The documentation site (docs/, published with GitHub Pages) bundles the
+following file to render diagrams. It is NOT linked into the released binaries:
+
+  docs/assets/vendor/mermaid.min.js  Mermaid 12.1.0, MIT
+                                     (license: docs/assets/vendor/mermaid.LICENSE)
+
 The following are development-only tool dependencies (declared with the go.mod
 `tool` directive). They are NOT linked into the released binaries:
 

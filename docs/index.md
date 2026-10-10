@@ -54,16 +54,20 @@ hokora が守る範囲は広くありません。
 
 ## 全体の構成
 
-```
-                     VPN                          公開(firewall で制限)
-  ┌──────────────┐   :8443  ┌───────────────┐  :9443  ┌──────────────┐
-  │ 運用者        │────────▶│  hokora        │◀────────│ アプリサーバー │
-  │ (ブラウザ)    │  Web UI │  (単一の       │ Machine │ hokora-client │
-  └──────────────┘         │   バイナリ)    │   API   │  または SDK   │
-                            │                │         └──────────────┘
-        root のみ ─────────▶│ admin socket   │
-        (unseal / seal)     │  SQLite(暗号文)│
-                            └───────────────┘
+```mermaid
+flowchart LR
+    op["運用者<br>(ブラウザ)"]
+    root["root のみ<br>(unseal / seal)"]
+    app["アプリサーバー<br>hokora-client または SDK"]
+    subgraph hokora["hokora(単一のバイナリ)"]
+        ui["Web UI<br>:8443"]
+        adm["admin socket"]
+        api["Machine API<br>:9443"]
+        db[("SQLite<br>(暗号文)")]
+    end
+    op -- "VPN" --> ui
+    root --> adm
+    app -- "公開<br>(firewall で制限)" --> api
 ```
 
 hokora への接続先は 3 つあります。

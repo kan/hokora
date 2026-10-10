@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The manual now has diagrams, screenshots and syntax highlighting** (#29).
+  The architecture, trust-boundary, envelope-encryption and seal/unseal figures
+  are Mermaid blocks in the Markdown itself, so GitHub renders them and their
+  content stays readable as text; the published site renders them with a
+  bundled copy of Mermaid (`docs/assets/vendor/`, nothing is loaded from a CDN).
+  The Web UI page shows screenshots taken from a throwaway database filled with
+  fictitious data — `make docs-screenshots` retakes them. Code samples are
+  coloured in both the light and the dark theme.
+
 ## [0.5.0] - 2026-10-10
 
 ### Security

@@ -102,16 +102,20 @@ hokora earns its extra moving parts only when you want:
 
 ## Architecture at a glance
 
-```
-                     VPN                          public (firewalled)
-  ┌──────────────┐   :8443  ┌───────────────┐  :9443  ┌──────────────┐
-  │ operator      │────────▶│  hokora        │◀────────│ app host      │
-  │ (browser)     │  Web UI │  (single Go    │ Machine │ hokora-client │
-  └──────────────┘         │   binary)      │   API   │  or sdk/      │
-                            │                │         └──────────────┘
-        root only ─────────▶│ admin unix sock│
-        (unseal/seal)       │  SQLite (enc)  │
-                            └───────────────┘
+```mermaid
+flowchart LR
+    op["operator<br>(browser)"]
+    root["root only<br>(unseal / seal)"]
+    app["app host<br>hokora-client or sdk/"]
+    subgraph hokora["hokora (single Go binary)"]
+        ui["Web UI<br>:8443"]
+        adm["admin unix socket"]
+        api["Machine API<br>:9443"]
+        db[("SQLite<br>(encrypted)")]
+    end
+    op -- "VPN" --> ui
+    root --> adm
+    app -- "public<br>(firewalled)" --> api
 ```
 
 - **Envelope encryption**: a master key (MK) unwraps a key-encryption key
@@ -152,7 +156,7 @@ Release binaries (recommended):
 From source (Go 1.27+; `go.mod` declares `toolchain go1.27.2`, which
 `GOTOOLCHAIN=auto` fetches automatically):
 
-```
+```bash
 git clone https://github.com/kan/hokora
 cd hokora
 make build          # produces ./hokora and ./hokora-client
@@ -161,7 +165,7 @@ make build          # produces ./hokora and ./hokora-client
 The Go SDK for applications (its own module: **no dependencies, and it does not
 impose the server's Go version — it needs only Go 1.24+**):
 
-```
+```bash
 go get github.com/kan/hokora/sdk
 ```
 

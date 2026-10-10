@@ -530,11 +530,30 @@ sdk のみ」を不変条件として検査する)。**`cmd/<name>/` を増や�
   マニュアルからは Runbook の節番号を参照する
 - **Web UI の表示(ラベル、ボタン、画面の遷移)、コマンドのフラグ、SDK の公開 API を
   変えたら、`docs/manual/` の該当ページも同じコミットで直す**
+- **`templates/` か `static/` を変えたら、
+  `make docs-screenshots HOKORA_CHROME=<Chromium か Chrome の実行ファイル>` で
+  スクリーンショット(`docs/assets/screenshots/`)を撮り直し、同じコミットに入れる。**
+  撮るのは `docs_screenshots_test.go` が使い捨ての DB に入れた架空のデータである。
+  **稼働中の hokora を撮った画像を `docs/` に置かない**(本物の secret、credential、
+  マスターキー、実在のホスト名や IP アドレスが写る)。画面を足すときは、
+  同じテストの一覧に足す。`make test` が見るのは、撮る画面、画像、文書からの参照が
+  そろっていることと、**撮影した時点から `templates/` と `static/` が変わって
+  いないこと**(`docs/assets/screenshots/sources.sha256`)である。画像の中身は
+  見ていないので、撮り直した画像は目で確かめる
+- **図は、本文に `mermaid` のコードブロックで書く。** GitHub はそのまま描き、
+  公開ページは同梱の `docs/assets/vendor/mermaid.min.js` で描く(`docs/assets/mermaid-init.js`)。
+  画像にして置かない(必読の文書の図が、本文を読むエージェントから見えなくなる)。
+  ディレクトリのツリー、番号付きの手順、時系列は文字のコードブロックのままでよい
+  - **mermaid を CDN から読み込む形に変えない。** 公開ページは外部から何も読み込まない
+  - 同梱の JS を差し替えたら、`mermaid.min.js.sha256` も更新する(`make docs-check` が
+    突き合わせる)。**この検査が見るのは取り違えや破損だけで、配布元と同じである
+    こと、最新であることは見ていない。** Dependabot も見ないので、更新は手作業である
+  - GitHub と公開ページでは mermaid の版が違う。図を足したら、両方で表示を確かめる
 - ページを足したら、`docs/_config.yml` の `nav` に足す
 - マニュアルは です・ます調で、一文ごとに改行する(行の途中で折り返すと、
   公開ページで日本語の途中に空白が入る)
 - **サイトのビルドは GitHub 側で走り、CI では検証していない。**
-  `make docs-check` が見るのは Liquid の記法だけである。レイアウトや
+  `make docs-check` が見るのは、Liquid の記法と、同梱の mermaid のハッシュだけである。レイアウトや
   `_config.yml` を変えたら、ローカルで `github-pages` gem を使ってビルドし、
   表示を確かめる
 
