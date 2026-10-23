@@ -13,4 +13,4 @@ module github.com/kan/hokora/sdk
 
 go 1.24
 
-toolchain go1.27.2
+toolchain go1.27.3

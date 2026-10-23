@@ -346,7 +346,7 @@
 
 | 項目 | 選択 | 備考 |
 |------|------|------|
-| 言語 | Go(`go 1.27` + `toolchain go1.27.2`) | `go.mod` が正。**2 つの行を別の目的で使い分ける**(下記) |
+| 言語 | Go(`go 1.27` + `toolchain go1.27.3`) | `go.mod` が正。**2 つの行を別の目的で使い分ける**(下記) |
 | DB | SQLite | `modernc.org/sqlite`(CGO 不要) |
 | DB アクセス | `database/sql` + 素の SQL | **ORM を使わない** |
 | HTTP | `net/http` + `http.ServeMux` | **Web フレームワークを使わない** |
@@ -360,7 +360,7 @@
 ```
 go 1.27
 
-toolchain go1.27.2
+toolchain go1.27.3
 ```
 
 - **`go` 行は「利用側に要求する最低言語バージョン」**。Go 1.21 以降、依存
@@ -371,7 +371,7 @@ toolchain go1.27.2
 - **`toolchain` 行は「hokora 自身がビルド・検査に使う処理系」**。
   依存 module の `toolchain` は無視される(効くのは main module のみ)ため、
   **利用側のコストはゼロ**。hokora 側は `GOTOOLCHAIN=auto`(既定)で
-  1.27.2 に切り替わり、`GOTOOLCHAIN=local` かつ古い処理系なら
+  1.27.3 に切り替わり、`GOTOOLCHAIN=local` かつ古い処理系なら
   go コマンドがエラーになる(fail closed)
 - **`toolchain` 行を省いてはならない。** `go 1.27` だけにすると、手元に
   go1.27.0 がある開発者は宣言を満たすため自動アップグレードが起きず、

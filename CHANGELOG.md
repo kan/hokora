@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The declared toolchain is now `go1.27.3`** (was `go1.27.2`). Go 1.27.3
+  (released 2026-10-19) contains security fixes to `crypto/x509`, which
+  hokora uses to verify TLS certificates. govulncheck did not yet report them
+  when the toolchain was raised, so this update was made from the Go release
+  notes rather than from the scheduled `vuln` workflow. The `go` lines are
+  unchanged; the SDK module still declares `go 1.24`.
+
 ### Changed
 
 - **The manual now has diagrams, screenshots and syntax highlighting** (#29).
