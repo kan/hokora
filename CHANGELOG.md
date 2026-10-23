@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-23
+
 ### Security
 
 - **The declared toolchain is now `go1.27.3`** (was `go1.27.2`). Go 1.27.3
@@ -28,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coloured in both the light and the dark theme. On wide screens each page of
   the published site also shows a sticky outline of its headings on the right,
   with the section being read highlighted.
+- **`golang.org/x/crypto` 0.57.0 → 0.58.0.** The release changes `ssh`,
+  `acme` and `salsa20`; hokora uses only argon2 from it. No code changes.
+- **Development and release tools:** golangci-lint 2.14.0 → 2.15.0,
+  govulncheck (`golang.org/x/vuln`) 1.8.0 → 1.9.0, and
+  `goreleaser/goreleaser-action` 7.2.3 → 7.3.0. None of them are linked into
+  the binaries.
 
 ## [0.5.0] - 2026-10-10
 
@@ -315,7 +323,8 @@ what it does not.
   rotation, and incident response.
 - **Release tooling**: reproducible Linux amd64/arm64 builds via GoReleaser.
 
-[Unreleased]: https://github.com/kan/hokora/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/kan/hokora/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/kan/hokora/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/kan/hokora/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/kan/hokora/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kan/hokora/compare/v0.2.0...v0.3.0
