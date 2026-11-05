@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Releases are now made with [tagpr](https://github.com/Songmu/tagpr).**
+  Merging the release pull request tags `vX.Y.Z`, and the workflow then tags
+  `sdk/vX.Y.Z` on the same commit before building, so `go get
+  github.com/kan/hokora/sdk` keeps resolving every release. The tags are no
+  longer pushed by hand.
+- **The GitHub release notes are now the version's section of this file**
+  instead of a list of commits.
+- **The release binaries are built in a job that cannot write to the
+  repository**, and the release is created from them in a separate job.
+  GoReleaser is now pinned in `tools/release/go.mod` (v2.20.0) and checked against
+  `go.sum`, instead of fetching the newest `v2` at release time. None of the
+  release tools are linked into the binaries.
+
 ## [0.5.1] - 2026-10-23
 
 ### Security
@@ -323,10 +338,9 @@ what it does not.
   rotation, and incident response.
 - **Release tooling**: reproducible Linux amd64/arm64 builds via GoReleaser.
 
-[Unreleased]: https://github.com/kan/hokora/compare/v0.5.1...HEAD
-[0.5.1]: https://github.com/kan/hokora/compare/v0.5.0...v0.5.1
-[0.5.0]: https://github.com/kan/hokora/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/kan/hokora/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/kan/hokora/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/kan/hokora/compare/v0.1.0...v0.2.0
+[0.5.1]: https://github.com/kan/hokora/releases/tag/v0.5.1
+[0.5.0]: https://github.com/kan/hokora/releases/tag/v0.5.0
+[0.4.0]: https://github.com/kan/hokora/releases/tag/v0.4.0
+[0.3.0]: https://github.com/kan/hokora/releases/tag/v0.3.0
+[0.2.0]: https://github.com/kan/hokora/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kan/hokora/releases/tag/v0.1.0

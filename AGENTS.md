@@ -96,6 +96,8 @@
 | tools を別 module に分離したとき、`dependabot.yml` は `directory: /` のままにした。**Dependabot は指定した directory の go.mod しか見ないため、`tools/` の更新 PR は一度も来なくなり、** golangci-lint は 2.12.2 で止まった。`toolchain` 行も Dependabot は上げないので go1.26.6 のまま 1.26.9 と 1.27 系を見送り、定期の govulncheck が 12 件で赤くなるまで誰も気付かなかった | **構成を変えたら、その構成を見張っている仕組みの設定も一緒に動かす。** 「更新 PR が来ていない」は「最新である」を意味しない。検知の対象から外れたものは、静かに古くなる |
 | 時刻で全行を引く索引を外した(schema v3)直後に書いた刈り込みが、**対象の行が尽きると、書き込みロックを持ったまま表全体を読む**実装だった(446 万行で約 0.5 秒のロックが 2 回)。文書には「稼働中のサーバーを止めない」と書いていた。自分で書いた並行のテストは、残す行が 480 行しか無く、通っていた | **「待たせない」「止めない」は、小さなデータのテストでは検証されない。** 行数で効いてくる保証を書く前に、実行計画をテストで固定し、本番の大きさの表で測る。索引を外したら、その索引に暗に頼っていた問い合わせが他に無いかを探す |
 | 上の実行計画のテストを、**本体の SQL を手で写した文字列**に対して書いた。本体の問い合わせを変えても、古い写しのまま通る | **検査の対象が、本体が実際に使うものと同じかを確かめる。** 写しを検査するテストは、書いた時点の本体しか守らない。文面を定数にして、本体とテストで共有する |
+| リリースのために goreleaser を `tools/go.mod` に足したら、**MVS で golangci-lint の依存(viper、prometheus/client_golang、zap など)の版まで引き上げられた。** `go` 行も `go 1.27.3` に書き換わり、`toolchain` 行が消えた。lint は通ったので見落とすところだった(品質レビューで発見) | **同じ module に置いたツールは build list を共有する。** ツールを足すときは、既存のツールの依存版が動いていないかを go.mod の差分で見る。互いに関係の無いツールは module を分ける(`tools/release/`) |
+| 同じコミットに `vX.Y.Z` と `sdk/vX.Y.Z` があるので、GoReleaser が sdk タグを版として拾わないよう `git.ignore_tags: ["sdk/*"]` を書いた。**v2.20.0 は `ignore_tags` を完全一致で比べるため、glob は HEAD のタグの選択に効いていなかった。** 手元で正しく動いたのは、版の並べ替えで `v…` が `sdk/v…` より先に来ていただけだった(コードレビューで発見) | **設定を書いたら、その値がどう比べられるかを実装で確かめる。** 試して期待どおりに動いても、別の理由で動いていることがある。版は `GORELEASER_CURRENT_TAG` で明示する |
 
 **この表は増える前提で書かれている。** 同種の誤りを見つけたら追記すること。
 
@@ -388,7 +390,9 @@ toolchain go1.27.3
 
 ### root と tools は Go の最新に追随する
 
-**root と `tools/` の go.mod は、最新の安定版 Go に追随させる。**
+**root と `tools/` の go.mod は、最新の安定版 Go に追随させる。** この節の
+`tools/` は `tools/release/` も含む(どちらもツール専用の module。「module は
+4 つある」節)。
 
 | 行 | root | `tools/` | `sdk/` |
 |---|---|---|---|
@@ -396,17 +400,25 @@ toolchain go1.27.3
 | `go` | 最新の minor(`go 1.27`) | 最新の minor | **追随させない**(1.24 のまま低く保つ) |
 
 - **新しい Go が出たら、patch でも minor でも `toolchain` 行を上げる。**
-  3 つの go.mod を同時に上げる(`make toolchain-check` がずれを弾く)
+  4 つの go.mod を同時に上げる(`make toolchain-check` がずれを弾く)
 - **新しい minor が出たら、root と `tools/` の `go` 行も上げる。**
   root は利用側から import されない(利用側が import するのは `sdk/`)ので、
   `go` 行を上げても利用側への強制にならない
 - **`sdk/` の `go` 行はこの方針の対象外である。** 上げるかどうかは
-  「利用側に要求してよいか」で決める(「module は 3 つある」節)
+  「利用側に要求してよいか」で決める(「module は 4 つある」節)
 - root と `tools/` の `go` 行は、依存が要求すれば `go 1.27.0` のように
   patch 付きへ書き換わる(依存の `go` 行は強制なので避けられない)。
   **これは root と `tools/` に限って許容する。** `sdk/` の `go` 行に patch を
   書かない規則は変わらない。`make toolchain-check` と `make toolchain-latest` は
   `go` 行を minor までで比べる
+- **依存が `toolchain` と同じ版を `go` 行に要求すると、go コマンドは
+  `toolchain` 行を消す**(`go 1.27.3` と `toolchain go1.27.3` は同じ意味になる
+  ため)。goreleaser は `go` 行に patch まで要求することがあり、そのとき
+  `tools/release/go.mod` から `toolchain` 行が消える。toolchain 行の無い module の
+  処理系は `go` 行の版なので、`make toolchain-check` はそのとき `go` 行を
+  toolchain として root と比べる。**root の `toolchain` 行を省いてよい理由には
+  ならない**(上の節)。root の `toolchain` を上げたら、
+  `go mod edit -C tools/release -toolchain=goX.Y.Z` で `toolchain` 行が戻る
 - **minor を上げるときは `tools/` の依存も一緒に上げる。** 古い
   golangci-lint は新しい Go の export data を読めず、lint が typecheck で
   落ちる(go1.27 と golangci-lint 2.12.2 で発生した)
@@ -420,6 +432,8 @@ toolchain go1.27.3
 | `toolchain` 行、root / `tools/` の `go` 行 | `make toolchain-latest`(go.dev の最新の安定版と突き合わせる)。`.github/workflows/toolchain.yml` が週次と手動実行で回す |
 | root の依存 | Dependabot(`directory: /`) |
 | `tools/` のツール本体(golangci-lint / govulncheck) | Dependabot(`directory: /tools`、`allow` で `dependency-type: all`) |
+| `tools/release/` のツール本体(goreleaser) | Dependabot(`directory: /tools/release`、同上) |
+| GitHub Actions(`uses:` と `actions.lock`) | Dependabot(`package-ecosystem: github-actions`) |
 
 - **Dependabot は `toolchain` 行を上げない。** Go 本体の更新を Dependabot の
   PR として待たない
@@ -429,8 +443,8 @@ toolchain go1.27.3
   検出するのであって、「新しい版が出た」ことは検出しない。** 両者を混同しない
 - **go.mod を増やしたら、`dependabot.yml` に `directory` を足す。**
   Dependabot は指定した directory の go.mod しか見ない
-- **`tools/go.mod` の require は全て `// indirect` である。** Dependabot の既定は
-  direct だけを更新するので、`allow` を外すと `/tools` の PR は来なくなる
+- **`tools/go.mod` と `tools/release/go.mod` の require は全て `// indirect` である。**
+  Dependabot の既定は direct だけを更新するので、`allow` を外すと PR は来なくなる
 - **新しい minor の直後は、対応する golangci-lint が出るまで追随できない
   ことがある。** その間 `toolchain.yml` は赤いままでよい(検出が働いている)。
   検査を緩めて緑にしない。`vuln.yml` と分けてあるのは、この赤で govulncheck の
@@ -457,6 +471,15 @@ toolchain go1.27.3
 - `github.com/golangci/golangci-lint/v2/cmd/golangci-lint`
 - `golang.org/x/vuln/cmd/govulncheck`
 
+リリースのビルドに使う `github.com/goreleaser/goreleaser/v2` は、
+**`tools/release/go.mod`** で固定する。`release.yml` の build ジョブが
+`make bin/goreleaser` でビルドして使う。**リリースのたびに版を固定しない
+goreleaser を取ってこない**(go.sum でハッシュを確かめ、Dependabot に版を
+追わせるため)。**goreleaser を `tools/go.mod` に入れない。** 同じ module に
+置くと、goreleaser の依存が MVS で golangci-lint の依存版を引き上げ、
+goreleaser の更新が lint を動かす(一度入れて、viper や prometheus の版が
+動いた)。
+
 これらは `go build` の成果物には入らない。**しかし root の `go.mod` に置くと、
 ツールの indirect(200 module 超)が root の go.mod に列挙され、SDK しか
 import していない利用側の module graph にまで伝播する**(実測: 利用側の
@@ -467,8 +490,8 @@ import していない利用側の module graph にまで伝播する**(実測: 
 **repo root で実行する**(`go tool -C tools` では `./...` が tools 側に
 解決され、本体をスキャンしない)。
 
-**go.mod が 2 つある以上、片方だけ宣言が古くなる経路ができる。**
-`make toolchain-check` が `tools/go.mod` の `go` / `toolchain` 行を root と
+**go.mod が複数ある以上、片方だけ宣言が古くなる経路ができる。**
+`make toolchain-check` が `tools/go.mod` などの `go` / `toolchain` 行を root と
 突き合わせる(`Makefile` の `SUBMODULES`)。go.mod を増やしたらここに足す。
 
 成果物に入る依存かどうかは `go list -deps .` で確認できる。
@@ -499,6 +522,9 @@ hokora/
 ├── cmd/hokora-client/   # クライアント専用バイナリ(get / run)。標準ライブラリ + sdk のみ
 ├── sdk/                 # 外部から import される Go SDK。**別 module**(依存ゼロ)
 ├── tools/               # 開発ツール専用の別 module(golangci-lint / govulncheck)
+│   └── release/         # リリースのツール専用の別 module(goreleaser)
+├── scripts/tagpr/       # kan/tagpr-scripts の git subtree。**中を編集しない**(「scripts/tagpr」節)
+├── .tagpr               # tagpr の設定(「リリース手順」節)
 └── docs/                # 設計文書と利用者向けマニュアル。**GitHub Pages の公開元**(下記)
 ```
 
@@ -557,13 +583,14 @@ sdk のみ」を不変条件として検査する)。**`cmd/<name>/` を増や�
   `_config.yml` を変えたら、ローカルで `github-pages` gem を使ってビルドし、
   表示を確かめる
 
-### module は 3 つある
+### module は 4 つある
 
 | module | 目的 | go 行(利用側への最低要求) |
 |---|---|---|
 | root(`github.com/kan/hokora`) | サーバー本体・クライアントバイナリ | 1.27(最新の minor に追随) |
 | `sdk/` | アプリに配る Go SDK。**依存ゼロ** | **1.24**(低く保つ) |
 | `tools/` | 開発ツール(lint / vuln)。成果物に入らない | 1.27(root と揃える) |
+| `tools/release/` | リリースのツール(goreleaser)。成果物に入らない。lint と build list を共有させないため `tools/` と分ける | 1.27(root と揃える。goreleaser が patch まで要求すれば patch 付き) |
 
 **分離の理由は、利用側の module graph と go 行の強制を切り離すことにある。**
 単一 module だと、SDK しか import していないアプリにも
@@ -595,13 +622,53 @@ sdk が別 module なので、`go get github.com/kan/hokora/sdk` は **`sdk/vX.Y
 module から除外される。** つまり sdk タグを打たずにサーバーだけリリースすると、
 `go get github.com/kan/hokora/sdk` は解決先を失う。
 
-手順(順序を守ること):
+**タグはワークフローが打つ。手で打たない**(下の「sdk タグが打たれなかったとき」を
+除く)。順序は次のとおりで、手順は「リリース手順」節にある。
 
-1. リリース準備コミット(CHANGELOG の版を確定)を push する
-2. **`sdk/vX.Y.Z` を先に打って push する**
-3. 続けて **`vX.Y.Z`** を同一コミットに打って push する
-   (`release.yml` が同番号・同コミットの sdk タグの存在を検査し、
-   無ければリリースを止める)
+1. リリース PR をマージすると、`tagpr.yml` の `tagpr` ジョブが
+   マージコミットに **`vX.Y.Z`** を打つ
+2. 同じ run の `sdk-tag` ジョブが、`vX.Y.Z` と同じコミットに
+   **`sdk/vX.Y.Z`** を打つ(GitHub の API で作る。`contents: write`)
+3. `sdk-tag` が成功したときだけ、`release` ジョブが `release.yml` を
+   `vX.Y.Z` で起動する
+4. `release.yml` は、同じ番号の sdk タグが同じコミットにあるかだけを検査し、
+   無ければリリースを止める(打ち忘れを沈黙させない)
+
+**tagpr は `vX.Y.Z` しか打てない。** 複数のタグを打つ設定は無い。
+`tagpr.tagPrefix` は monorepo の各 project に**独立した版**を持たせる設定で、
+リリース PR も別になるので、番号を連動させる下の方針と合わない。tagpr は
+`sdk/v*` を版のタグとして数えない(版で始まるタグだけを読む)ので、
+`sdk/vX.Y.Z` が次の版の計算に混ざることはない。
+
+**`sdk-tag` は再実行してよい。** `sdk/vX.Y.Z` が既に同じコミットにあれば何もせず
+成功する。別のコミットにあれば止まる。
+
+#### sdk タグが打たれなかったとき
+
+`sdk-tag` が失敗すると、`vX.Y.Z` だけがあり Release は作られていない状態で止まる。
+**`release.yml` を手で起動しない**(sdk タグの検査で止まる)。次の順で直す。
+
+1. ログを読む: `gh run view <run-id> --log-failed`
+2. **API の一時的な失敗なら、失敗したジョブだけを再実行する:**
+   `gh run rerun <run-id> --failed`。`sdk-tag` と、それに続く `release` が
+   走り直す。`tagpr` ジョブは走り直さず、最初の run が出したタグを使う
+   (`tagpr` から再実行すると、タグが既にあるので出力が空になり、
+   `sdk-tag` が飛ばされる)
+3. **`sdk/vX.Y.Z が別のコミットを指している` で止まったら、人が判断する。
+   公開済みの `sdk/vX.Y.Z` を別のコミットへ打ち直さない。** proxy.golang.org と
+   sum.golang.org が最初の内容を記録しているので、打ち直すと利用側の
+   `go get` が checksum mismatch で落ちる。その版の Release は作らずに、
+   次の版をリリースする
+4. 再実行できないとき(run の再実行の期限を過ぎた等)は、手で打ってから
+   `release.yml` を起動する。`sdk/v*` の push では `release.yml` は起動しない
+   (`v*` は `/` を含むタグに一致しない)
+
+   ```bash
+   git fetch --tags
+   git tag sdk/vX.Y.Z 'vX.Y.Z^{commit}'
+   git push origin sdk/vX.Y.Z
+   gh workflow run release.yml --ref vX.Y.Z
+   ```
 
 番号の方針:
 
@@ -615,6 +682,131 @@ module から除外される。** つまり sdk タグを打たずにサーバ�
   メジャーは Go API の破壊でのみ上げ、その時点で番号体系を分離する
 - root は replace でツリー内の sdk を使うため、root の go.mod を
   sdk のタグに合わせて更新する必要はない
+
+### リリース手順
+
+**リリースは tagpr のリリース PR をマージして始める**(0.5.1 の次の版から)。
+`CHANGELOG.md` の節の書き換えとタグは、リリース PR とワークフローが行う。
+**「リリース準備: CHANGELOG を更新する」のコミットを手で作らない。タグも手で
+打たない。** 設定は `.tagpr`、CHANGELOG の処理は `scripts/tagpr/`
+(下の「scripts/tagpr」節)。
+
+1. **変更を入れる PR で CHANGELOG を書く**
+
+   利用者に届く変更は、その PR で `## [Unreleased]` に足す。**この節がそのまま
+   GitHub のリリースノートになる。**
+   - 項目の中のリンクはインラインで、**絶対 URL** で書く。参照形式のリンクの定義は
+     節の外にあるのでリリースノートではリンクにならず、`docs/...` のような相対
+     リンクは Release のページから解決されない
+   - 末尾のリンク定義(`[X.Y.Z]: .../releases/tag/vX.Y.Z`)はリリース PR が
+     版ごとに足すので、手で足さない。`[Unreleased]` のリンクは置かない
+   - ほかの書式の規則(折り返し、節の終わりの判定など)は
+     `scripts/tagpr/README.md`「What the CHANGELOG has to look like」に従う
+
+2. **リリース PR を確かめる**
+
+   ```bash
+   gh pr list --label tagpr --state open --json number,title,headRefName
+   gh run list --workflow tagpr.yml --branch master -L 3
+   ```
+
+   - **最新の tagpr の run が success であること。** 失敗していたら
+     `release-prepare.mjs` の出力を読む。多いのは `## [Unreleased]` が空のとき。
+     CHANGELOG を書く PR を master にマージすると作り直される
+   - **版(PR のタイトル)が正しいこと。** 既定は patch。前回のリリース以降に
+     マージした PR が `enhancement` ラベルを持っていれば minor になる
+     (`.tagpr` の `minorLabels`)。手で変えるときはリリース PR にラベルを付けて
+     作り直す
+
+     ```bash
+     gh pr edit <番号> --add-label tagpr:minor
+     gh workflow run tagpr.yml --ref master
+     ```
+
+   - **PR のタイトルの版と CHANGELOG の見出しの版が一致していること。** タグの版は
+     マージの時点のラベルで決まり、見出しは最後に作り直した時点の版のまま。
+     食い違ったままマージすると、タグは打たれるが `release.yml` が節を見つけられずに
+     止まる
+   - Files changed が `CHANGELOG.md`(見出しとリンク定義)だけであること
+   - 節を直すときは、リリース PR のブランチではなく **master の `## [Unreleased]` を
+     直す**(ブランチは tagpr が作り直すたびに master から作られる)
+   - 見出しの日付は、tagpr が最後にリリース PR を作り直した日(日本時間)。マージする
+     日と違えば `gh workflow run tagpr.yml --ref master` で作り直す
+   - リリース PR の CI は承認待ち(`action_required`)で止まることがある
+     (GITHUB_TOKEN が作った PR のため)。そのときは今の head の run を承認する
+     (`gh api -X POST repos/kan/hokora/actions/runs/<id>/approve`)
+
+3. **リリース PR をマージする**
+
+   ```bash
+   gh pr merge <番号> --squash --delete-branch
+   git switch master && git pull --ff-only
+   gh run list --workflow tagpr.yml --commit "$(git rev-parse HEAD)" -L 1
+   gh run list --workflow release.yml -L 1
+   ```
+
+   マージの push で走る tagpr の run が、マージコミットに `vX.Y.Z` と
+   `sdk/vX.Y.Z` を打ち、`release.yml` をそのタグで起動する(「リリースはタグが
+   2 系統になる」節)。**タグが打たれるまで master へほかの PR をマージしない。**
+   tagpr の run は前の run が終わるまで待ち、待っている run は新しい push の run に
+   置き換えられる(cancelled になる)。置き換えられたら、マージコミットの run を
+   `gh run rerun <run-id>` で再実行するとタグが打たれる。`sdk-tag` が失敗したときは
+   「sdk タグが打たれなかったとき」に従う
+
+   リリースの直後は `## [Unreleased]` が空なので、次に CHANGELOG を書くまで master
+   への push ごとに tagpr の run が失敗する。これは想定どおりで、その間のリリース PR は
+   マージしない。
+
+4. **Release の成果物と本文を確かめる**
+
+   `release.yml` の `build` ジョブ(`contents: read`)が GoReleaser で 4 つの
+   アーカイブと `checksums.txt` を作り、`publish` ジョブ(`contents: write`)が
+   Release を作る。**書き込み権限を持つジョブではビルドしない。**
+   Release の本文は `node scripts/tagpr/release-notes.mjs vX.Y.Z` の出力と同じ。
+   あわせて、sdk タグが解決できることを確かめる
+
+   ```bash
+   GOPROXY=https://proxy.golang.org go list -m github.com/kan/hokora/sdk@vX.Y.Z
+   ```
+
+   `release.yml` が失敗したら、`gh run rerun <run-id> --failed` で再実行する。
+   `publish` が Release を作った後で失敗していたら、その Release を消してから
+   再実行する(`gh release create` は同じタグの Release があると失敗する)
+
+### scripts/tagpr
+
+[kan/tagpr-scripts](https://github.com/kan/tagpr-scripts) を git subtree で取り込んだもの。
+使い方は同梱の README.md と AGENTS.md にある。
+
+- **`scripts/tagpr/` の中は編集しない。** 足りないものや不具合は kan/tagpr-scripts を
+  直し、こちらへは次で取り込む(subtree は `commit.gpgsign` が効かないので `-S` を付ける)
+
+  ```bash
+  git subtree pull -S --prefix=scripts/tagpr https://github.com/kan/tagpr-scripts.git main --squash
+  ```
+
+- **取り込む PR はマージコミットでマージする。** squash すると subtree が前回の取り込みを
+  見つけられず、次の `git subtree pull` が壊れる
+- 取り込みは CHANGELOG に書かない(利用者に届く変更ではない)
+- Node は組み込みのモジュールだけで動く。ワークフローに setup-node を足さない
+  (ランナーの node を使う)
+
+### GitHub Actions
+
+- **action は `.github/workflows/actions.lock`(workflow lockfile)でコミットに
+  固定する。** `uses:` は完全な版のタグ(`@v7.0.1`)で書く。SHA を直接書かない。
+  Actions は lockfile にある commit で動かし、`verify-lockfile.yml` が PR と
+  master への push で `gh actions-lock --verify` を走らせる
+- `uses:` を足したり変えたりしたら `gh actions-lock` を再実行し、lockfile も
+  一緒にコミットする。**lockfile は手で編集しない。** 拡張の版は、CI では
+  `verify-lockfile.yml` の `--pin` で固定し、手元では固定しない(最新を使う)。
+  `gh extension list` で手元の版を確かめ、CI の `--pin` より新しければ、
+  lockfile を作り直すコミットで CI の `--pin` も同じ版に上げる(形式が変わると
+  `--verify` が落ちる)
+- **書き込み権限(`contents: write` など)は、要るジョブにだけ付ける。**
+  ワークフローの既定は `contents: read`。**書き込み権限を持つジョブでビルドしない**
+  (Go の依存やツールを取ってきて走らせない)。ビルドは `release.yml` の `build`
+  ジョブ(`contents: read`)だけで行う
 
 ---
 
@@ -659,6 +851,10 @@ M7(リリース準備)
 
 - 意味のある単位でコミットする。コミットメッセージは日本語でよい
 - **secret や鍵を含むファイルをコミットしない**(`.gitignore` を整備)
+- **master へ直接 push しない。ブランチを切って PR を作る。** tagpr はマージされた
+  PR からリリース PR を組み立てるので、直接 push した変更はリリースの確認から漏れる
+- 利用者に届く変更を入れる PR では、`CHANGELOG.md` の `## [Unreleased]` に項目を
+  足す(「リリース手順」節)
 
 #### コミット前に必ず実行すること
 

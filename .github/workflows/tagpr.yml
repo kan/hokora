@@ -1,0 +1,133 @@
+name: tagpr
+
+# リリース PR を最新に保ち、マージされたらリリースを始める。設定は .tagpr、
+# 手順は AGENTS.md「リリース手順」。
+#
+# - master への push のたびに、リリース PR(ブランチ tagpr-from-v<前の版>)を
+#   master の上に作り直す。CHANGELOG の節は scripts/tagpr/release-prepare.mjs
+#   (ランナーの node で動く)が書き換える。
+# - リリース PR がマージされると、次の run がマージコミットに vX.Y.Z を打ち、
+#   sdk-tag ジョブが同じコミットに sdk/vX.Y.Z を打ち、release ジョブが
+#   そのタグで release.yml を起動する。
+# - workflow_dispatch はリリース PR を作り直す(tagpr:minor を付けた後など)。
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tagpr:
+    name: Prepare the release pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # run を重ねない(同じブランチを互いに作り直す)。走っている run も
+    # 止めない(タグを打った直後に止まると、Release の無いタグが残る)。
+    # 待っている run は新しい push の run に置き換えられうる。その対処は
+    # AGENTS.md「リリース手順」。
+    concurrency:
+      group: tagpr
+      cancel-in-progress: false
+    permissions:
+      contents: write       # リリース PR のブランチとタグの push
+      pull-requests: write  # リリース PR の作成と更新
+      issues: read          # ラベルの読み取り
+    outputs:
+      tag: ${{ steps.tagpr.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run tagpr
+        id: tagpr
+        uses: Songmu/tagpr@v1.21.4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # tagpr は vX.Y.Z しか打たないので、ここで同じコミットに sdk/vX.Y.Z を打つ
+  # (AGENTS.md「リリースはタグが 2 系統になる」)。再実行してよい。既に同じ
+  # コミットにあれば何もせず、別のコミットにあれば止める。
+  sdk-tag:
+    name: Tag the SDK module
+    needs: tagpr
+    if: needs.tagpr.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write  # sdk/vX.Y.Z の作成
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.tagpr.outputs.tag }}
+    # checkout しない。タグは API で作る(書き込みのトークンを git に渡さない)。
+    steps:
+      - name: Create sdk/${{ needs.tagpr.outputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::想定していないタグ: $TAG"; exit 1 ;;
+          esac
+          sdk_tag="sdk/$TAG"
+
+          # タグの ref が指すコミット。注釈付きのタグなら、タグのオブジェクトを
+          # たどってコミットを得る。
+          commit_of() {
+            local out type sha
+            out="$(gh api "repos/$GH_REPO/git/ref/tags/$1" \
+              --jq '.object.type + " " + .object.sha')" || return 1
+            read -r type sha <<<"$out"
+            if [ "$type" = tag ]; then
+              out="$(gh api "repos/$GH_REPO/git/tags/$sha" \
+                --jq '.object.type + " " + .object.sha')" || return 1
+              read -r type sha <<<"$out"
+            fi
+            if [ "$type" != commit ]; then
+              echo "::error::$1 がコミットを指していない ($type)" >&2
+              return 1
+            fi
+            echo "$sha"
+          }
+
+          commit="$(commit_of "$TAG")"
+          echo "$TAG=$commit"
+
+          if gh api "repos/$GH_REPO/git/ref/tags/$sdk_tag" --silent 2>/dev/null; then
+            existing="$(commit_of "$sdk_tag")"
+            if [ "$existing" = "$commit" ]; then
+              echo "$sdk_tag は既に $commit にある"
+              exit 0
+            fi
+            echo "::error::$sdk_tag が別のコミット ($existing) を指している。$TAG は $commit"
+            exit 1
+          fi
+
+          gh api -X POST "repos/$GH_REPO/git/refs" \
+            -f ref="refs/tags/$sdk_tag" -f sha="$commit" --silent
+          echo "$sdk_tag=$commit を作成した"
+
+  # GITHUB_TOKEN で push したタグではワークフローが起動しないが、
+  # workflow_dispatch はこの制約の対象外である。タグを ref にして起動すると
+  # github.ref が refs/tags/vX.Y.Z になり、GoReleaser と release.yml がそれを読む。
+  #
+  # release.yml は sdk/vX.Y.Z が同じコミットにあることを検査するので、
+  # sdk-tag の後に起動する。sdk-tag が飛ばされたか失敗したら、このジョブも
+  # 走らない(if を書かないときの既定)。
+  release:
+    name: Start the release
+    needs: [tagpr, sdk-tag]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write  # workflow_dispatch
+    steps:
+      - name: Dispatch release.yml on the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.tagpr.outputs.tag }}
+        run: gh workflow run release.yml --ref "$TAG"

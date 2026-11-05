@@ -43,6 +43,11 @@ start if it cannot lock memory.
 - **`gofmt` / `goimports` clean, `golangci-lint` passing.** Fix the code rather
   than suppressing a lint; `//nolint` needs a reason in a comment.
 - **Commit messages may be in Japanese or English.** Explain the *why*.
+- **A change that users will notice adds its entry under `## [Unreleased]` in
+  `CHANGELOG.md`**, in the same pull request. That section becomes the GitHub
+  release notes word for word, so write links inline as absolute URLs.
+  Releases are cut with [tagpr](https://github.com/Songmu/tagpr); see
+  "リリース手順" in [AGENTS.md](AGENTS.md).
 - Do not commit secrets, keys, or database files (`.gitignore` guards the common
   cases).
 

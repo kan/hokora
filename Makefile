@@ -8,14 +8,14 @@ BINDIR     ?= bin
 # toolchain-check が検査する(**2 つ目の go.mod ができた時点で、片方だけ
 # 古くなる経路ができる**)。go 行は利用側への最低要求なので、sdk のように
 # 意図的に低く宣言してよい(root より高いのは許さない)。
-SUBMODULES := tools/go.mod sdk/go.mod
+SUBMODULES := tools/go.mod tools/release/go.mod sdk/go.mod
 
 # パッケージを持つ module。sdk は別 module なので、root の ./... には
 # 入らない。**test / vet / lint を root だけで回すと sdk が素通しになる。**
 MODULES := . sdk
 
 .PHONY: all build build-client test vet fmt fmt-check lint vuln tidy clean \
-        toolchain-check toolchain-latest docs-check docs-screenshots
+        toolchain-check toolchain-latest docs-check docs-screenshots goreleaser-check
 
 all: toolchain-check fmt-check docs-check vet lint test build
 
@@ -69,6 +69,7 @@ toolchain-check:
 	rootgo="$$(sed -n 's/^go //p' go.mod | cut -d. -f1,2)"; \
 	for f in $(SUBMODULES); do \
 		g="$$(sed -n 's/^go //p' $$f | cut -d. -f1,2)"; t="$$(sed -n 's/^toolchain go//p' $$f)"; \
+		t="$${t:-$$(sed -n 's/^go //p' $$f)}"; \
 		if [ "$$t" != "$$want" ]; then \
 			echo "$$f の toolchain が go.mod とずれている (go$$t / root は go$$want)"; \
 			exit 1; \
@@ -81,6 +82,11 @@ toolchain-check:
 # go 行の比較は minor までで行う。依存が `go 1.27.0` を要求すると go コマンドが
 # go 行を patch 付きへ書き換えるが、`sort -V` は `1.27` < `1.27.0` と並べるため、
 # そのまま比べると tools だけ書き換わった時点で「root より新しい」と誤判定する。
+#
+# toolchain 行の無い module は、go 行を toolchain として比べる(理由は AGENTS.md
+# 「root と tools は Go の最新に追随する」)。**宣言の文字列を比べる。**
+# `go -C <dir> env GOVERSION` は古い宣言でも手元の新しい処理系を返すので、
+# 宣言のずれを検出できない。
 
 # go.mod の宣言が、公開されている最新の安定版 Go に追随していることを確かめる
 # (AGENTS.md「root と tools は Go の最新に追随する」)。
@@ -91,9 +97,9 @@ toolchain-check:
 # 変更起因ではないので `all` には入れず、toolchain.yml の定期実行から呼ぶ。
 #
 # 検査するのは toolchain 行(全 module で共通。toolchain-check が揃える)と、
-# root / tools の go 行の minor。sdk の go 行は利用側への最低要求なので見ない。
+# root / tools / tools/release の go 行の minor。sdk の go 行は利用側への最低要求なので見ない。
 # 取得に失敗したら通さない(検査できていないのに緑にしない)。
-LATEST_GO_MODS := go.mod tools/go.mod
+LATEST_GO_MODS := go.mod tools/go.mod tools/release/go.mod
 
 toolchain-latest:
 	@latest="$$(curl -fsSL --retry 3 --retry-all-errors 'https://go.dev/VERSION?m=text' \
@@ -163,6 +169,17 @@ $(BINDIR)/govulncheck: tools/go.mod tools/go.sum
 	$(GO) build -C tools -o ../$(BINDIR)/govulncheck \
 		golang.org/x/vuln/cmd/govulncheck
 
+# リリースのビルド(release.yml の build ジョブ)が使う。版は tools/release/go.mod
+# で固定し、go.sum でハッシュを確かめる。lint / vuln とは別 module である
+# (tools/release/go.mod の冒頭)。
+$(BINDIR)/goreleaser: tools/release/go.mod tools/release/go.sum
+	$(GO) build -C tools/release -o ../../$(BINDIR)/goreleaser \
+		github.com/goreleaser/goreleaser/v2
+
+# .goreleaser.yaml の検査。
+goreleaser-check: $(BINDIR)/goreleaser
+	$(BINDIR)/goreleaser check
+
 lint: $(BINDIR)/golangci-lint
 	@for m in $(MODULES); do \
 		echo "==> golangci-lint ($$m)"; \
@@ -173,7 +190,7 @@ vuln: $(BINDIR)/govulncheck
 	$(BINDIR)/govulncheck ./...
 
 tidy:
-	@for m in $(MODULES) tools; do $(GO) mod tidy -C $$m || exit 1; done
+	@for m in $(MODULES) tools tools/release; do $(GO) mod tidy -C $$m || exit 1; done
 
 clean:
 	rm -f $(BIN) $(CLIENT_BIN)

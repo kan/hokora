@@ -8,7 +8,13 @@
 #   hokora         — the server (links SQLite + argon2)
 #   hokora-client  — the app-host client (standard library only)
 #
-# Validate locally with: goreleaser check
+# GoReleaser is pinned in tools/release/go.mod. Validate locally with:
+#   make goreleaser-check
+#
+# vX.Y.Z and the SDK module's sdk/vX.Y.Z sit on the same commit. release.yml
+# names the version with GORELEASER_CURRENT_TAG. git.ignore_tags cannot do
+# this: v2.20.0 compares its entries exactly, so a glob such as "sdk/*" does
+# not keep the SDK tag out when GoReleaser picks the tag at HEAD.
 version: 2
 
 project_name: hokora
@@ -63,13 +69,8 @@ checksum:
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
+# GoReleaser only builds (release.yml runs it with --skip=publish). The release
+# notes are the CHANGELOG.md section of the version, which release.yml passes
+# to gh release create.
 changelog:
-  sort: asc
-  filters:
-    exclude:
-      - "^Merge "
-
-release:
-  github:
-    owner: kan
-    name: hokora
+  disable: true
