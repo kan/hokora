@@ -49,7 +49,9 @@ const FENCE = /^ *(`{3,}|~{3,})(.*)$/;
  */
 function scan(text) {
   if (text.includes('\r')) {
-    throw new ReleaseError('CHANGELOG.md has CR line endings; save it with LF');
+    throw new ReleaseError(
+      'CHANGELOG.md has CR line endings; save it with LF (on Windows, add `CHANGELOG.md text eol=lf` to .gitattributes)',
+    );
   }
   /** @type {string | null} 開いているフェンスの記号の並び */
   let open = null;
@@ -171,10 +173,14 @@ const STANDALONE = /^(?:#{1,6}(?:\s|$)|>|\||<(?![A-Za-z][\w+.-]*:)[A-Za-z/!?]|(?
 // 表の区切りの行（`--- | ---`、`|:--|--:|`）
 const TABLE_DELIMITER = /^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?$/;
 // 日本語の文字（漢字、かな、全角の記号と英数字）。この文字どうしの間の改行は空白にしない。
-// Script_Extensions で見るのは、「ー」「・」が Script では Common になるため
-const CJK = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}　-〿＀-￯]/u;
-// 全角の句読点と括弧（、。，．・「」（）【】など）。前後の相手が英数字でも空白を入れない
-const CJK_PUNCT = /[　-〿・！-／：-＠［-｀｛-･]/u;
+// Script_Extensions で見るのは、「ー」「・」が Script では Common になるため。
+// 範囲はエスケープで書く（全角スペースをそのまま書くと、取り込み先の eslint の
+// no-irregular-whitespace に当たる）。U+3000-U+303F は CJK の記号と句読点、
+// U+FF00-U+FFEF は全角と半角の形
+const CJK = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\u{3000}-\u{303F}\u{FF00}-\u{FFEF}]/u;
+// 全角の句読点と括弧（、。，．・「」（）【】など）。前後の相手が英数字でも空白を入れない。
+// U+30FB は「・」、U+FF01-U+FF65 のうち英数字（０-９ Ａ-Ｚ ａ-ｚ）を除いたもの
+const CJK_PUNCT = /[\u{3000}-\u{303F}\u{30FB}\u{FF01}-\u{FF0F}\u{FF1A}-\u{FF20}\u{FF3B}-\u{FF40}\u{FF5B}-\u{FF65}]/u;
 // 強制改行: 行末の空白 2 つ以上か `\`
 const HARD_BREAK = /(?: {2}|\\)$/;
 
@@ -221,7 +227,8 @@ export function unwrapLines(body) {
       // 前の行の最後の文字と次の行の最初の文字（サロゲートペアも 1 文字に数える）
       const [last, first] = [[...head].at(-1), String.fromCodePoint(text.codePointAt(0))];
       const sep = (CJK.test(last) && CJK.test(first)) || CJK_PUNCT.test(last) || CJK_PUNCT.test(first) ? '' : ' ';
-      // 行末の空白は残す（強制改行の空白 2 つを消さない）
+      // 前の行の末尾の空白は落とす（強制改行の行はつながないので、普通の空白しか無い）。
+      // 次の行の末尾の空白は残す（強制改行の空白 2 つを消さない）
       prev.line = head + sep + line.trimStart();
       prev.joinable = !HARD_BREAK.test(line);
       return;
