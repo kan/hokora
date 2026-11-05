@@ -1,59 +1,130 @@
 name: release
 
-# タグ push でリリースする。GoReleaser が Linux amd64/arm64 の 2 バイナリを
-# ビルドし、アーカイブ・チェックサム・GitHub Release を作る(.goreleaser.yaml)。
+# tagpr.yml が、tagpr の打ったタグを ref にして workflow_dispatch で起動する
+# (GITHUB_TOKEN で push したタグでは push が起動しない)。push のトリガは、
+# 手で打ったタグのためにある。どちらでも github.ref はタグである。
+#
+# build ジョブが GoReleaser で Linux amd64/arm64 の 2 バイナリをビルドし
+# (.goreleaser.yaml)、publish ジョブが CHANGELOG の節を本文にして Release を作る。
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
+# 権限は各ジョブに書く。
 permissions:
-  # Release とアセットの作成に書き込みが要る。
-  contents: write
+  contents: read
+
+# タグごとに 1 つ。止めない(Release を作っている途中で止まると、
+# 半端な Release が残る)。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  goreleaser:
+  # リポジトリへの書き込み権限を持たずにビルドする。
+  build:
+    # workflow_dispatch はブランチでも起動できるが、リリースはタグでだけ行う。
+    # publish はこのジョブに依存するので、この条件が両方を守る。
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      # changelog 生成のため全履歴を取る。
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
-          fetch-depth: 0
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+          fetch-depth: 0  # タグ(sdk/vX.Y.Z を含む)を取る
+          persist-credentials: false
+
+      # **sdk タグを打たずにサーバーだけリリースすると、利用側の
+      # `go get github.com/kan/hokora/sdk` が壊れる**(AGENTS.md「リリースは
+      # タグが 2 系統になる」)。打ち忘れを沈黙させないよう、同じ番号の sdk タグが
+      # 同じコミットにあるかを検査する。sdk タグは tagpr.yml の sdk-tag ジョブが打つ。
+      - name: sdk タグの検査
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! sdk_commit="$(git rev-parse -q --verify "refs/tags/sdk/$TAG^{commit}")"; then
+            echo "::error::sdk/$TAG タグが無い。tagpr.yml の sdk-tag ジョブの結果を確かめること"
+            echo "(AGENTS.md「リリースはタグが 2 系統になる」を参照)"
+            exit 1
+          fi
+          srv_commit="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          echo "sdk/$TAG=$sdk_commit  $TAG=$srv_commit"
+          if [ "$sdk_commit" != "$srv_commit" ]; then
+            echo "::error::sdk/$TAG と $TAG が別コミットを指している"
+            exit 1
+          fi
+
+      # publish ジョブはこの節から Release の本文を作る。タグの節が無ければ、
+      # ビルドの前にここで止める。
+      - name: CHANGELOG の節の検査
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/tagpr/release-notes.mjs "$TAG" > /dev/null
+
+      # キャッシュを使わない。別のワークフローが書いたキャッシュを、リリースの
+      # バイナリに届かせない。
+      - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
-          # tools/go.sum (開発ツール) の変更もキャッシュキーに反映させる。
-          cache-dependency-path: "**/go.sum"
+          cache: false
       # 「設定した」ではなく「効いている」を確かめる。setup-go は go.mod の
       # `toolchain` 行を優先して入れる。リリース成果物が宣言どおりの処理系で
       # ビルドされることを固定する。
       - name: toolchain
         run: make toolchain-check
 
-      # sdk は別 module であり、`go get github.com/kan/hokora/sdk` は
-      # **`sdk/vX.Y.Z` タグでしか解決されない。** さらに、root module のタグを
-      # 打つと nested module である sdk/ はその module から除外されるため、
-      # **sdk タグを打たずにサーバーだけリリースすると利用側の go get が壊れる。**
-      # 打ち忘れを沈黙させないよう、リリース前に同番号・同コミットを検査する。
-      - name: sdk タグの検査
-        run: |
-          v="${GITHUB_REF_NAME}"
-          if ! git rev-parse -q --verify "refs/tags/sdk/$v^{commit}" >/dev/null; then
-            echo "::error::sdk/$v タグが無い。sdk/$v を先に打ってから $v を打つこと"
-            echo "(AGENTS.md「リリースはタグが 2 系統になる」を参照)"
-            exit 1
-          fi
-          sdk_commit="$(git rev-parse "refs/tags/sdk/$v^{commit}")"
-          srv_commit="$(git rev-parse "refs/tags/$v^{commit}")"
-          echo "sdk/$v=$sdk_commit  $v=$srv_commit"
-          if [ "$sdk_commit" != "$srv_commit" ]; then
-            echo "::error::sdk/$v と $v が別コミットを指している"
-            exit 1
-          fi
-
-      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
-        with:
-          version: '~> v2'
-          args: release --clean
+      # GoReleaser の版は tools/release/go.mod で固定し、go.sum で確かめる。
+      # Release の作成は publish ジョブに任せる。本文は GoReleaser ではなく
+      # CHANGELOG.md から作る。
+      #
+      # 同じコミットに sdk/vX.Y.Z もあるので、版を明示する(.goreleaser.yaml の
+      # 冒頭。git.ignore_tags の glob では外せない)。
+      - name: build
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+        run: |
+          make bin/goreleaser
+          bin/goreleaser release --clean --skip=publish
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: release-dist
+          path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          retention-days: 1
+          if-no-files-found: error
+
+  # build ジョブの成果物から Release を作る。ここでは何もビルドしない。
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Release の作成
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # scripts/tagpr/release-notes.mjs と CHANGELOG.md のため
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: release-dist
+          path: dist
+
+      # その版の CHANGELOG.md の節(プレリリースなら Unreleased)。build ジョブが
+      # 節の有無を確かめてある。
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ contains(github.ref_name, '-') }}
+        run: |
+          notes="$RUNNER_TEMP/release-notes.md"
+          node scripts/tagpr/release-notes.mjs "$TAG" > "$notes"
+          gh release create "$TAG" --verify-tag --prerelease="$PRERELEASE" \
+            --title "$TAG" --notes-file "$notes" \
+            dist/*.tar.gz dist/checksums.txt

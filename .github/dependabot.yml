@@ -1,8 +1,9 @@
 version: 2
 
-# GitHub Actions は commit SHA で pin する(タグは書き換えられるため)。
-# Dependabot は SHA を追随しつつ末尾の `# vX.Y.Z` コメントも更新するので、
-# pin の維持コストはここで吸収される。
+# GitHub Actions は .github/workflows/actions.lock(workflow lockfile)で
+# commit に固定する(タグは書き換えられるため)。uses: は完全な版のタグで書く。
+# Dependabot は actions の更新 PR で uses: と lockfile の該当エントリを
+# 一緒に作り直す。
 updates:
   - package-ecosystem: github-actions
     directory: /
@@ -36,6 +37,21 @@ updates:
     groups:
       # ツールとその推移的依存はバイナリに入らないため、まとめて 1 つの PR にする。
       dev-tools:
+        patterns:
+          - "*"
+
+  # リリースのツール(tools/release/go.mod の goreleaser)。lint / vuln と
+  # build list を共有させないための別 module なので、PR も別に来る。
+  # require が全て `// indirect` なのは tools/ と同じ。
+  - package-ecosystem: gomod
+    directory: /tools/release
+    schedule:
+      interval: weekly
+    allow:
+      - dependency-name: github.com/goreleaser/goreleaser/v2
+        dependency-type: all
+    groups:
+      release-tools:
         patterns:
           - "*"
 

@@ -1,0 +1,27 @@
+name: Verify Lockfile
+
+# .github/workflows/actions.lock がワークフローの uses: と食い違っていないか、
+# 固定したコミットが上流で検証できるかを確かめる。壊れた lockfile を master に
+# 入れないための検査。lockfile の更新の仕方は AGENTS.md「GitHub Actions」。
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify actions.lock
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      # 拡張は 1.0 前なので、CI では版を固定する。この版は Dependabot も
+      # actions.lock も追わないので、手で上げる(AGENTS.md「GitHub Actions」)。
+      - run: gh extension install github/gh-actions-lock --pin v0.4.1
+      - run: gh actions-lock --verify
