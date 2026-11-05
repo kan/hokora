@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GoReleaser is now pinned in `tools/release/go.mod` (v2.20.0) and checked against
   `go.sum`, instead of fetching the newest `v2` at release time. None of the
   release tools are linked into the binaries.
+- **`modernc.org/sqlite` 1.60.1 → 1.61.1** (with `modernc.org/libc`,
+  `github.com/dustin/go-humanize` and `github.com/ncruces/go-strftime`). The
+  bundled SQLite is now 3.54. No hokora code changes; the DSN and PRAGMA
+  handling is unaffected.
 
 ## [0.5.1] - 2026-10-23
 
