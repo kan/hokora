@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-05
+
 ### Changed
 
 - **Releases are now made with [tagpr](https://github.com/Songmu/tagpr).**
@@ -342,6 +344,7 @@ what it does not.
   rotation, and incident response.
 - **Release tooling**: reproducible Linux amd64/arm64 builds via GoReleaser.
 
+[0.5.2]: https://github.com/kan/hokora/releases/tag/v0.5.2
 [0.5.1]: https://github.com/kan/hokora/releases/tag/v0.5.1
 [0.5.0]: https://github.com/kan/hokora/releases/tag/v0.5.0
 [0.4.0]: https://github.com/kan/hokora/releases/tag/v0.4.0
