@@ -3,11 +3,16 @@ name: tagpr
 # リリース PR を最新に保ち、マージされたらリリースを始める。設定は .tagpr、
 # 手順は AGENTS.md「リリース手順」。
 #
+# tagpr のジョブの中身は kan/tagpr-scripts の共通の workflow
+# (scripts/tagpr/.github/workflows/tagpr.yml がその写し)。動き、入力、落ちたときの
+# 扱いは tagpr-scripts の README の「The tagpr workflow」。
+#
 # - master への push のたびに、リリース PR(ブランチ tagpr-from-v<前の版>)を
-#   master の上に作り直す。CHANGELOG の節は scripts/tagpr/release-prepare.mjs
-#   (ランナーの node で動く)が書き換える。
-# - リリース PR がマージされると、次の run がマージコミットに vX.Y.Z を打ち、
-#   sdk-tag ジョブが同じコミットに sdk/vX.Y.Z を打ち、release ジョブが
+#   master の上に作り直す。CHANGELOG の節は scripts/tagpr/release-prepare.mjs が
+#   書き換える。落ちた run ではリリース PR を draft にし、次に成功した run で
+#   ready に戻す。
+# - リリース PR がマージされると、次の run がマージコミットに annotated の vX.Y.Z を
+#   打ち、sdk-tag ジョブが同じコミットに sdk/vX.Y.Z を打ち、release ジョブが
 #   そのタグで release.yml を起動する。
 # - workflow_dispatch はリリース PR を作り直す(tagpr:minor を付けた後など)。
 on:
@@ -18,35 +23,27 @@ on:
 permissions:
   contents: read
 
+# **この workflow に concurrency を付けない。** 共通の workflow の tagpr のジョブが
+# run を 1 つずつ並べる。呼ぶ側に同じ名前の group を付けると GitHub が deadlock として
+# 止め、別の名前でも、待っている run を置き換える場所が 2 つに増える。
 jobs:
   tagpr:
-    name: Prepare the release pull request
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # run を重ねない(同じブランチを互いに作り直す)。走っている run も
-    # 止めない(タグを打った直後に止まると、Release の無いタグが残る)。
-    # 待っている run は新しい push の run に置き換えられうる。その対処は
-    # AGENTS.md「リリース手順」。
-    concurrency:
-      group: tagpr
-      cancel-in-progress: false
+    # **SHA は scripts/tagpr/ に取り込んだ tagpr-scripts の commit にする。** subtree を
+    # 取り込む PR で一緒に上げる(AGENTS.md「scripts/tagpr」)。別の repo の reusable
+    # workflow は actions.lock では固定されず、Dependabot には上げさせない(dependabot.yml)
+    uses: kan/tagpr-scripts/.github/workflows/tagpr.yml@776734198ce4cade40332a9d1772ef8a2fd01c2f
+    # 共通の workflow が使える権限の上限。4 つとも書く。actions: write は共通の
+    # workflow の release ジョブの宣言のためで、release-workflow が空なのでそのジョブは
+    # 走らない。足りないと、run が始まる前に権限の検査で落ちる
     permissions:
       contents: write       # リリース PR のブランチとタグの push
       pull-requests: write  # リリース PR の作成と更新
       issues: read          # ラベルの読み取り
-    outputs:
-      tag: ${{ steps.tagpr.outputs.tag }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Run tagpr
-        id: tagpr
-        uses: Songmu/tagpr@v1.21.4
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      actions: write        # 上の注記
+    # release.yml は sdk/vX.Y.Z の後に起動するので、共通の workflow には起動させない
+    # (下の release ジョブが起動する)
+    with:
+      release-workflow: ''
 
   # tagpr は vX.Y.Z しか打たないので、ここで同じコミットに sdk/vX.Y.Z を打つ
   # (AGENTS.md「リリースはタグが 2 系統になる」)。再実行してよい。既に同じ

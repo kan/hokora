@@ -622,11 +622,12 @@ sdk が別 module なので、`go get github.com/kan/hokora/sdk` は **`sdk/vX.Y
 module から除外される。** つまり sdk タグを打たずにサーバーだけリリースすると、
 `go get github.com/kan/hokora/sdk` は解決先を失う。
 
-**タグはワークフローが打つ。手で打たない**(下の「sdk タグが打たれなかったとき」を
-除く)。順序は次のとおりで、手順は「リリース手順」節にある。
+**タグはワークフローが打つ。手で打たない**(下の「sdk タグが打たれなかったとき」と
+「`vX.Y.Z` が annotated になっていないとき」を除く)。順序は次のとおりで、手順は
+「リリース手順」節にある。
 
-1. リリース PR をマージすると、`tagpr.yml` の `tagpr` ジョブが
-   マージコミットに **`vX.Y.Z`** を打つ
+1. リリース PR をマージすると、`tagpr.yml` の `tagpr` ジョブ(kan/tagpr-scripts の
+   共通の workflow)がマージコミットに **`vX.Y.Z`** を打ち、annotated に打ち直す
 2. 同じ run の `sdk-tag` ジョブが、`vX.Y.Z` と同じコミットに
    **`sdk/vX.Y.Z`** を打つ(GitHub の API で作る。`contents: write`)
 3. `sdk-tag` が成功したときだけ、`release` ジョブが `release.yml` を
@@ -653,7 +654,9 @@ module から除外される。** つまり sdk タグを打たずにサーバ�
    `gh run rerun <run-id> --failed`。`sdk-tag` と、それに続く `release` が
    走り直す。`tagpr` ジョブは走り直さず、最初の run が出したタグを使う
    (`tagpr` から再実行すると、タグが既にあるので出力が空になり、
-   `sdk-tag` が飛ばされる)
+   `sdk-tag` が飛ばされる)。**再実行した後、`sdk-tag` が飛ばされず成功したことを
+   確かめる**(`gh run view <run-id>`)。`tagpr` ジョブは共通の workflow の呼び出しで、
+   その出力が再実行で引き継がれるとは限らない。飛ばされていたら 4 に従う
 3. **`sdk/vX.Y.Z が別のコミットを指している` で止まったら、人が判断する。
    公開済みの `sdk/vX.Y.Z` を別のコミットへ打ち直さない。** proxy.golang.org と
    sum.golang.org が最初の内容を記録しているので、打ち直すと利用側の
@@ -661,14 +664,41 @@ module から除外される。** つまり sdk タグを打たずにサーバ�
    次の版をリリースする
 4. 再実行できないとき(run の再実行の期限を過ぎた等)は、手で打ってから
    `release.yml` を起動する。`sdk/v*` の push では `release.yml` は起動しない
-   (`v*` は `/` を含むタグに一致しない)
+   (`v*` は `/` を含むタグに一致しない)。`sdk/vX.Y.Z` は API で作るのと同じく
+   lightweight で打つ
 
    ```bash
-   git fetch --tags
+   git fetch --force origin tag vX.Y.Z
    git tag sdk/vX.Y.Z 'vX.Y.Z^{commit}'
    git push origin sdk/vX.Y.Z
    gh workflow run release.yml --ref vX.Y.Z
    ```
+
+#### `vX.Y.Z` が annotated になっていないとき
+
+`tagpr` ジョブが `vX.Y.Z` を打った後に落ちると(tagpr のステップがタグの push の
+後で落ちたときも、annotated に打ち直すステップが落ちたときも)、`vX.Y.Z` は
+lightweight のまま残り、`sdk-tag` と `release` は飛ばされる。
+**tagpr の run を再実行しない**(タグが既にあるので出力が空になり、何も起きない)。
+確かめ方は `git fetch --force origin tag vX.Y.Z && git cat-file -t vX.Y.Z`
+(`tag` なら annotated、`commit` なら lightweight)。lightweight なら、**先に
+`sdk/vX.Y.Z` を打ってから** `vX.Y.Z` を打ち直す。`vX.Y.Z` の push が `push: tags` で
+`release.yml` を起動するので、逆の順にすると sdk タグの検査で止まる。`gh workflow run`
+は重ねない(同じタグで 2 回走る)。
+
+```bash
+git fetch --force origin tag vX.Y.Z
+git tag sdk/vX.Y.Z 'vX.Y.Z^{commit}'
+git push origin sdk/vX.Y.Z
+git tag -a -f -m "Release vX.Y.Z" vX.Y.Z 'vX.Y.Z^{commit}'
+git push -f origin vX.Y.Z
+```
+
+`sdk/vX.Y.Z` が既にあれば最初の 3 行は要らない(同じコミットを指していることは
+確かめる)。annotated になっていて、`tagpr` ジョブが成功しているのに `release.yml` が
+起動していないときは、`sdk-tag` か `release` のどちらかが落ちている。上の
+「sdk タグが打たれなかったとき」の 2 に従う。マージコミットの run が cancelled なら、
+「リリース手順」の 3 のとおり run 全体を再実行する
 
 番号の方針:
 
@@ -688,7 +718,8 @@ module から除外される。** つまり sdk タグを打たずにサーバ�
 **リリースは tagpr のリリース PR をマージして始める**(0.5.1 の次の版から)。
 `CHANGELOG.md` の節の書き換えとタグは、リリース PR とワークフローが行う。
 **「リリース準備: CHANGELOG を更新する」のコミットを手で作らない。タグも手で
-打たない。** 設定は `.tagpr`、CHANGELOG の処理は `scripts/tagpr/`
+打たない**(「sdk タグが打たれなかったとき」と「`vX.Y.Z` が annotated になって
+いないとき」を除く)。設定は `.tagpr`、CHANGELOG の処理は `scripts/tagpr/`
 (下の「scripts/tagpr」節)。
 
 1. **変更を入れる PR で CHANGELOG を書く**
@@ -710,7 +741,8 @@ module から除外される。** つまり sdk タグを打たずにサーバ�
    gh run list --workflow tagpr.yml --branch master -L 3
    ```
 
-   - **最新の tagpr の run が success であること。** 失敗していたら
+   - **最新の tagpr の run が success であること。** 失敗した run はリリース PR を
+     draft にする(成功した次の run が ready へ戻す)。失敗していたら
      `release-prepare.mjs` の出力を読む。多いのは `## [Unreleased]` が空のとき。
      CHANGELOG を書く PR を master にマージすると作り直される
    - **版(PR のタイトル)が正しいこと。** 既定は patch。前回のリリース以降に
@@ -751,7 +783,14 @@ module から除外される。** つまり sdk タグを打たずにサーバ�
    tagpr の run は前の run が終わるまで待ち、待っている run は新しい push の run に
    置き換えられる(cancelled になる)。置き換えられたら、マージコミットの run を
    `gh run rerun <run-id>` で再実行するとタグが打たれる。`sdk-tag` が失敗したときは
-   「sdk タグが打たれなかったとき」に従う
+   「sdk タグが打たれなかったとき」に、`vX.Y.Z` が annotated でないときは
+   「`vX.Y.Z` が annotated になっていないとき」に従う
+
+   置き換えた側の run は「already has `## [X.Y.Z]`」で赤になり、版だけ上がった
+   リリース PR が draft で残ることがある。**その PR はマージせず、タグが打たれた後に
+   閉じる。** 共通の workflow は、成功した run でラベル `tagpr` の付いた draft を
+   すべて ready に戻す。閉じる前に push が入ると、古いまま ready になる(新しい
+   リリース PR とは別の PR。kan/tagpr-scripts#11)。ready でもマージしない
 
    リリースの直後は `## [Unreleased]` が空なので、次に CHANGELOG を書くまで master
    への push ごとに tagpr の run が失敗する。これは想定どおりで、その間のリリース PR は
@@ -787,14 +826,34 @@ module から除外される。** つまり sdk タグを打たずにサーバ�
 
 - **取り込む PR はマージコミットでマージする。** squash すると subtree が前回の取り込みを
   見つけられず、次の `git subtree pull` が壊れる
+- **同じ PR で、`tagpr.yml` の `uses: kan/tagpr-scripts/...@<SHA>` の SHA を上げる。**
+  上げ先は squash のコミットにある `git-subtree-split` の SHA
+  (取り込んだ tagpr-scripts の commit)。hokora 側の squash やマージのコミットの
+  SHA と取り違えない
 - 取り込みは CHANGELOG に書かない(利用者に届く変更ではない)
-- Node は組み込みのモジュールだけで動く。ワークフローに setup-node を足さない
-  (ランナーの node を使う)
+- Node は組み込みのモジュールだけで動く。tagpr のジョブでは、共通の workflow が
+  setup-node で入れる Node 24 で動く。`release.yml`(`release-notes.mjs`)は
+  ランナーの node で動く。`release.yml` に setup-node を足さない。ランナーの Node の入れ替わりで、
+  2 つの版は食い違うことがある
+- **`tagpr.yml` の `tagpr` ジョブは、kan/tagpr-scripts の共通の workflow を呼ぶ。**
+  落ちた run での draft、`vX.Y.Z` を annotated に打ち直すことはそちらにある。
+  動きと落ちたときの扱いは、tagpr-scripts の README の「The tagpr workflow」。
+  `release-workflow` は空にして、`release.yml` の起動は hokora の `release` ジョブに
+  残す(`sdk-tag` の後に起動するため)
+- **呼ぶジョブには、権限を 4 つとも書く**(`actions: write` を含む)。run の開始時に、
+  飛ばされるジョブの権限まで検査される
+- **`tagpr.yml` に `concurrency` を付けない。** run を並べるのは共通の workflow の
+  tagpr のジョブ(`cancel-in-progress: false`、group は `tagpr-scripts-release-pr`)。
+  呼ぶ側に同じ名前の group を付けると deadlock として止まる。別の名前でも、待っている
+  run を置き換える場所が 2 つに増える
 
 ### GitHub Actions
 
 - **action は `.github/workflows/actions.lock`(workflow lockfile)でコミットに
-  固定する。** `uses:` は完全な版のタグ(`@v7.0.1`)で書く。SHA を直接書かない。
+  固定する。** `uses:` は完全な版のタグ(`@v7.0.1`)で書く。SHA を直接書かない
+  (例外は別の repo の reusable workflow を呼ぶ行で、lockfile が固定しないので SHA で
+  書く。今あるのは `tagpr.yml` の 1 行。「scripts/tagpr」節)。tagpr など、共通の
+  workflow の中の action は tagpr-scripts の `actions.lock` が固定する。
   Actions は lockfile にある commit で動かし、`verify-lockfile.yml` が PR と
   master への push で `gh actions-lock --verify` を走らせる
 - `uses:` を足したり変えたりしたら `gh actions-lock` を再実行し、lockfile も
