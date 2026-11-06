@@ -346,6 +346,10 @@ func TestWorkflowUsesArePinnedByFullVersionTag(t *testing.T) {
 
 	usesRe := regexp.MustCompile(`^\s*(?:-\s+)?uses:\s*["']?([^"'\s#]+)["']?`)
 	pinned := regexp.MustCompile(`^[\w.-]+/[\w./-]+@v\d+\.\d+\.\d+$`)
+	// 例外: 別の repo の reusable workflow は actions.lock が固定しないので、
+	// 完全な SHA で書く(AGENTS.md「GitHub Actions」「scripts/tagpr」)。
+	// 許すのは subtree で取り込んだ kan/tagpr-scripts の workflow だけである。
+	reusableBySHA := regexp.MustCompile(`^kan/tagpr-scripts/\.github/workflows/[\w.-]+\.ya?ml@[0-9a-f]{40}$`)
 
 	for _, file := range workflowFiles(t) {
 		var count int
@@ -359,7 +363,7 @@ func TestWorkflowUsesArePinnedByFullVersionTag(t *testing.T) {
 			if strings.HasPrefix(ref, "./") {
 				continue // リポジトリ内の action / reusable workflow
 			}
-			if !pinned.MatchString(ref) {
+			if !pinned.MatchString(ref) && !reusableBySHA.MatchString(ref) {
 				t.Errorf("%s:%d: uses: %s must name a full version tag (owner/repo@vX.Y.Z); "+
 					"pin the commit in actions.lock, not in uses: (AGENTS.md)", file, l.no, ref)
 			}
@@ -387,7 +391,9 @@ func TestWorkflowWritePermissionsAreConfinedToAllowedJobs(t *testing.T) {
 			"publish": {"contents"},
 		},
 		"tagpr.yml": {
-			"tagpr":   {"contents", "pull-requests"},
+			// actions: write は共通の workflow の release ジョブの宣言のため
+			// (release-workflow が空なので、そのジョブは走らない)
+			"tagpr":   {"contents", "pull-requests", "actions"},
 			"sdk-tag": {"contents"},
 			"release": {"actions"},
 		},
