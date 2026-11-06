@@ -370,7 +370,8 @@ func TestWorkflowUsesArePinnedByFullVersionTag(t *testing.T) {
 		}
 		if count == 0 {
 			// 読み取りの形が崩れて 0 件になったことを見逃さない
-			// (全てのワークフローが少なくとも checkout を使う)。
+			// (全てのワークフローが少なくとも 1 つは uses: を持つ。checkout か、
+			// tagpr.yml のように reusable workflow の呼び出し)。
 			t.Errorf("%s: no uses: lines found; has the workflow format changed?", file)
 		}
 	}
