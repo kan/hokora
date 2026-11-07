@@ -650,19 +650,21 @@ module から除外される。** つまり sdk タグを打たずにサーバ�
 **`release.yml` を手で起動しない**(sdk タグの検査で止まる)。次の順で直す。
 
 1. ログを読む: `gh run view <run-id> --log-failed`
-2. **API の一時的な失敗なら、失敗したジョブだけを再実行する:**
-   `gh run rerun <run-id> --failed`。`sdk-tag` と、それに続く `release` が
-   走り直す。`tagpr` ジョブは走り直さず、最初の run が出したタグを使う
-   (`tagpr` から再実行すると、タグが既にあるので出力が空になり、
-   `sdk-tag` が飛ばされる)。**再実行した後、`sdk-tag` が飛ばされず成功したことを
-   確かめる**(`gh run view <run-id>`)。`tagpr` ジョブは共通の workflow の呼び出しで、
-   その出力が再実行で引き継がれるとは限らない。飛ばされていたら 4 に従う
+2. **API の一時的な失敗なら、マージコミットの run を再実行する:**
+   `gh run rerun <run-id>`。tagpr(v1.22.0 から)は、マージコミットを指すタグが
+   既にあれば受け入れて `tag` を出し直すので、`sdk-tag` と、それに続く `release` まで
+   走り直す。**再実行した後、`sdk-tag` が飛ばされず成功したことを確かめる**
+   (`gh run view <run-id>`)。飛ばされていたら `tagpr` ジョブのログを読む(タグが別の
+   コミットを指していると tagpr は止まる)。再実行できないときは 4 に従う。
+   **`release` ジョブが `release.yml` を起動し終えた run は
+   再実行しない**(同じタグでもう一度起動する)。共通の workflow の再実行の扱いは、
+   `scripts/tagpr/README.md` の「The tagpr workflow」にある
 3. **`sdk/vX.Y.Z が別のコミットを指している` で止まったら、人が判断する。
    公開済みの `sdk/vX.Y.Z` を別のコミットへ打ち直さない。** proxy.golang.org と
    sum.golang.org が最初の内容を記録しているので、打ち直すと利用側の
    `go get` が checksum mismatch で落ちる。その版の Release は作らずに、
    次の版をリリースする
-4. 再実行できないとき(run の再実行の期限を過ぎた等)は、手で打ってから
+4. 再実行できないとき(GitHub が run の再実行を許す 30 日を過ぎたとき)は、手で打ってから
    `release.yml` を起動する。`sdk/v*` の push では `release.yml` は起動しない
    (`v*` は `/` を含むタグに一致しない)。`sdk/vX.Y.Z` は API で作るのと同じく
    lightweight で打つ
@@ -679,7 +681,12 @@ module から除外される。** つまり sdk タグを打たずにサーバ�
 `tagpr` ジョブが `vX.Y.Z` を打った後に落ちると(tagpr のステップがタグの push の
 後で落ちたときも、annotated に打ち直すステップが落ちたときも)、`vX.Y.Z` は
 lightweight のまま残り、`sdk-tag` と `release` は飛ばされる。
-**tagpr の run を再実行しない**(タグが既にあるので出力が空になり、何も起きない)。
+**マージコミットの run を再実行する**(`gh run rerun <run-id>`)。tagpr(v1.22.0 から)が
+既にあるタグを受け入れて `tag` を出し直し、共通の workflow が annotated に打ち直してから、
+`sdk-tag` と `release` が走る。タグが別のコミットを指していれば tagpr は止まる
+(扱いは `scripts/tagpr/README.md` の「The tagpr workflow」)。
+
+**手で打ち直すのは、run を再実行できないとき(30 日を過ぎたとき)だけである。**
 確かめ方は `git fetch --force origin tag vX.Y.Z && git cat-file -t vX.Y.Z`
 (`tag` なら annotated、`commit` なら lightweight)。lightweight なら、**先に
 `sdk/vX.Y.Z` を打ってから** `vX.Y.Z` を打ち直す。`vX.Y.Z` の push が `push: tags` で
@@ -742,7 +749,8 @@ git push -f origin vX.Y.Z
    ```
 
    - **最新の tagpr の run が success であること。** 失敗した run はリリース PR を
-     draft にする(成功した次の run が ready へ戻す)。失敗していたら
+     draft にする(draft と ready の扱いは `scripts/tagpr/README.md` の
+     「The tagpr workflow」)。失敗していたら
      `release-prepare.mjs` の出力を読む。多いのは `## [Unreleased]` が空のとき。
      CHANGELOG を書く PR を master にマージすると作り直される
    - **版(PR のタイトル)が正しいこと。** 既定は patch。前回のリリース以降に
@@ -787,10 +795,9 @@ git push -f origin vX.Y.Z
    「`vX.Y.Z` が annotated になっていないとき」に従う
 
    置き換えた側の run は「already has `## [X.Y.Z]`」で赤になり、版だけ上がった
-   リリース PR が draft で残ることがある。**その PR はマージせず、タグが打たれた後に
-   閉じる。** 共通の workflow は、成功した run でラベル `tagpr` の付いた draft を
-   すべて ready に戻す。閉じる前に push が入ると、古いまま ready になる(新しい
-   リリース PR とは別の PR。kan/tagpr-scripts#11)。ready でもマージしない
+   リリース PR が draft で残ることがある。**その PR はマージしない。** タグが打たれた後、
+   master への push で成功した run が、コメントを付けて閉じる(`scripts/tagpr/README.md` の
+   「The tagpr workflow」)。開き直してマージしない
 
    リリースの直後は `## [Unreleased]` が空なので、次に CHANGELOG を書くまで master
    への push ごとに tagpr の run が失敗する。これは想定どおりで、その間のリリース PR は
@@ -830,14 +837,21 @@ git push -f origin vX.Y.Z
   上げ先は squash のコミットにある `git-subtree-split` の SHA
   (取り込んだ tagpr-scripts の commit)。hokora 側の squash やマージのコミットの
   SHA と取り違えない
+- **2 つがそろっていることは、`ci.yml` の `test` ジョブが
+  `node scripts/tagpr/verify-subtree.mjs` で確かめる。** `scripts/tagpr/` の tree と、
+  呼ぶ行の commit の tree を比べ、SHA の上げ忘れ、pull を伴わない SHA の変更、
+  `scripts/tagpr/` の手での編集で落ちる
 - 取り込みは CHANGELOG に書かない(利用者に届く変更ではない)
 - Node は組み込みのモジュールだけで動く。tagpr のジョブでは、共通の workflow が
   setup-node で入れる Node 24 で動く。`release.yml`(`release-notes.mjs`)は
   ランナーの node で動く。`release.yml` に setup-node を足さない。ランナーの Node の入れ替わりで、
   2 つの版は食い違うことがある
 - **`tagpr.yml` の `tagpr` ジョブは、kan/tagpr-scripts の共通の workflow を呼ぶ。**
-  落ちた run での draft、`vX.Y.Z` を annotated に打ち直すことはそちらにある。
-  動きと落ちたときの扱いは、tagpr-scripts の README の「The tagpr workflow」。
+  落ちた run での draft、成功した run で前のリリース PR を閉じること、`vX.Y.Z` を
+  annotated に打ち直すことはそちらにある。動き、落ちたときの扱い、再実行での復旧は、
+  `scripts/tagpr/README.md` の「The tagpr workflow」。**この文書に書き写さない**
+  (tagpr の版が変わるたびにずれる)。共通の workflow についてここに書くのは、hokora に固有のこと
+  (`sdk/vX.Y.Z` のタグ、`release-workflow` を空にしていること)だけである。
   `release-workflow` は空にして、`release.yml` の起動は hokora の `release` ジョブに
   残す(`sdk-tag` の後に起動するため)
 - **呼ぶジョブには、権限を 4 つとも書く**(`actions: write` を含む)。run の開始時に、

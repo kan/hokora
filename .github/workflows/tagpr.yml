@@ -9,8 +9,8 @@ name: tagpr
 #
 # - master への push のたびに、リリース PR(ブランチ tagpr-from-v<前の版>)を
 #   master の上に作り直す。CHANGELOG の節は scripts/tagpr/release-prepare.mjs が
-#   書き換える。落ちた run ではリリース PR を draft にし、次に成功した run で
-#   ready に戻す。
+#   書き換える。落ちた run と成功した run でのリリース PR の扱い(draft と ready、
+#   前のリリース PR を閉じること)は、上の README の節にある。
 # - リリース PR がマージされると、次の run がマージコミットに annotated の vX.Y.Z を
 #   打ち、sdk-tag ジョブが同じコミットに sdk/vX.Y.Z を打ち、release ジョブが
 #   そのタグで release.yml を起動する。
@@ -31,7 +31,7 @@ jobs:
     # **SHA は scripts/tagpr/ に取り込んだ tagpr-scripts の commit にする。** subtree を
     # 取り込む PR で一緒に上げる(AGENTS.md「scripts/tagpr」)。別の repo の reusable
     # workflow は actions.lock では固定されず、Dependabot には上げさせない(dependabot.yml)
-    uses: kan/tagpr-scripts/.github/workflows/tagpr.yml@776734198ce4cade40332a9d1772ef8a2fd01c2f
+    uses: kan/tagpr-scripts/.github/workflows/tagpr.yml@966347b01e86b2aea4d71da0604588b17642b880
     # 共通の workflow が使える権限の上限。4 つとも書く。actions: write は共通の
     # workflow の release ジョブの宣言のためで、release-workflow が空なのでそのジョブは
     # 走らない。足りないと、run が始まる前に権限の検査で落ちる
