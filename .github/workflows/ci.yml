@@ -40,6 +40,11 @@ jobs:
       - name: docs
         run: make docs-check
 
+      # scripts/tagpr/ の中身と、tagpr.yml が呼ぶ tagpr-scripts の commit が
+      # 同じ tree かを確かめる(AGENTS.md「scripts/tagpr」)。Node はランナーのもの。
+      - name: Check scripts/tagpr/ against the tagpr workflow pin
+        run: node scripts/tagpr/verify-subtree.mjs
+
       - name: go vet
         run: make vet
 
