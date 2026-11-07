@@ -705,7 +705,7 @@ git push -f origin vX.Y.Z
 確かめる)。annotated になっていて、`tagpr` ジョブが成功しているのに `release.yml` が
 起動していないときは、`sdk-tag` か `release` のどちらかが落ちている。上の
 「sdk タグが打たれなかったとき」の 2 に従う。マージコミットの run が cancelled なら、
-「リリース手順」の 3 のとおり run 全体を再実行する
+「リリース手順」の 3 に従う(次の run が再実行する。しなかったときだけ手で再実行する)
 
 番号の方針:
 
@@ -751,16 +751,17 @@ git push -f origin vX.Y.Z
    - **最新の tagpr の run が success であること。** 失敗した run はリリース PR を
      draft にする(draft と ready の扱いは `scripts/tagpr/README.md` の
      「The tagpr workflow」)。失敗していたら
-     `release-prepare.mjs` の出力を読む。多いのは `## [Unreleased]` が空のとき。
-     CHANGELOG を書く PR を master にマージすると作り直される
+     `release-prepare.mjs` の出力を読む。`## [Unreleased]` が空のまま tagpr が走ると
+     落ちる(手で `gh workflow run tagpr.yml` を起動したときは、出すものが無くても
+     tagpr が走る)。CHANGELOG を書く PR を master にマージすると作り直される
    - **版(PR のタイトル)が正しいこと。** 既定は patch。前回のリリース以降に
      マージした PR が `enhancement` ラベルを持っていれば minor になる
-     (`.tagpr` の `minorLabels`)。手で変えるときはリリース PR にラベルを付けて
-     作り直す
+     (`.tagpr` の `minorLabels`)。手で変えるときはリリース PR にラベルを付ける。
+     `tagpr-label.yml` がリリース PR を draft にし、`tagpr.yml` を起動して作り直す。
+     **ready に戻るまでマージしない**
 
      ```bash
      gh pr edit <番号> --add-label tagpr:minor
-     gh workflow run tagpr.yml --ref master
      ```
 
    - **PR のタイトルの版と CHANGELOG の見出しの版が一致していること。** タグの版は
@@ -789,19 +790,22 @@ git push -f origin vX.Y.Z
    `sdk/vX.Y.Z` を打ち、`release.yml` をそのタグで起動する(「リリースはタグが
    2 系統になる」節)。**タグが打たれるまで master へほかの PR をマージしない。**
    tagpr の run は前の run が終わるまで待ち、待っている run は新しい push の run に
-   置き換えられる(cancelled になる)。置き換えられたら、マージコミットの run を
-   `gh run rerun <run-id>` で再実行するとタグが打たれる。`sdk-tag` が失敗したときは
+   置き換えられる(cancelled になる)。置き換えられても、次の run がマージコミットの
+   run を再実行してタグを打たせる(`sdk-tag` と `release` もその run で走る。
+   `scripts/tagpr/README.md` の「The tagpr workflow」)。**次の run が再実行しなかった
+   ときだけ**(マージや run が見つからないという warning が出て、タグが無いまま)、
+   マージコミットの run を `gh run rerun <run-id>` で手で再実行する。どちらの場合も、
+   `sdk-tag` が飛ばされず成功したことを確かめる。`sdk-tag` が失敗したときは
    「sdk タグが打たれなかったとき」に、`vX.Y.Z` が annotated でないときは
    「`vX.Y.Z` が annotated になっていないとき」に従う
 
-   置き換えた側の run は「already has `## [X.Y.Z]`」で赤になり、版だけ上がった
-   リリース PR が draft で残ることがある。**その PR はマージしない。** タグが打たれた後、
-   master への push で成功した run が、コメントを付けて閉じる(`scripts/tagpr/README.md` の
-   「The tagpr workflow」)。開き直してマージしない
+   置き換えが起きると、版だけ上がったリリース PR が draft で残ることがある。
+   **その PR はマージしない。** タグが打たれた後、成功した run が、コメントを付けて
+   閉じる(同じ README の節)。開き直してマージしない
 
-   リリースの直後は `## [Unreleased]` が空なので、次に CHANGELOG を書くまで master
-   への push ごとに tagpr の run が失敗する。これは想定どおりで、その間のリリース PR は
-   マージしない。
+   リリースの直後は `## [Unreleased]` が空なので、次に CHANGELOG を書くまで、master
+   への push の tagpr の run は tagpr を走らせず、notice を出して成功で終わる
+   (リリース PR は作られない)。
 
 4. **Release の成果物と本文を確かめる**
 
@@ -833,14 +837,18 @@ git push -f origin vX.Y.Z
 
 - **取り込む PR はマージコミットでマージする。** squash すると subtree が前回の取り込みを
   見つけられず、次の `git subtree pull` が壊れる
-- **同じ PR で、`tagpr.yml` の `uses: kan/tagpr-scripts/...@<SHA>` の SHA を上げる。**
+- **同じ PR で、`tagpr.yml` と `tagpr-label.yml` の `uses: kan/tagpr-scripts/...@<SHA>` の
+  SHA を上げる。** 2 つの行は同じ SHA にする。
   上げ先は squash のコミットにある `git-subtree-split` の SHA
   (取り込んだ tagpr-scripts の commit)。hokora 側の squash やマージのコミットの
   SHA と取り違えない
-- **2 つがそろっていることは、`ci.yml` の `test` ジョブが
+- **`scripts/tagpr/` と呼ぶ行がそろっていることは、`ci.yml` の `test` ジョブが
   `node scripts/tagpr/verify-subtree.mjs` で確かめる。** `scripts/tagpr/` の tree と、
-  呼ぶ行の commit の tree を比べ、SHA の上げ忘れ、pull を伴わない SHA の変更、
-  `scripts/tagpr/` の手での編集で落ちる
+  呼ぶ行の commit の tree を比べる。落ちるのは次のとき
+  - SHA の上げ忘れ
+  - pull を伴わない SHA の変更
+  - `scripts/tagpr/` の手での編集
+  - 呼ぶ行どうしの SHA の食い違い
 - 取り込みは CHANGELOG に書かない(利用者に届く変更ではない)
 - Node は組み込みのモジュールだけで動く。tagpr のジョブでは、共通の workflow が
   setup-node で入れる Node 24 で動く。`release.yml`(`release-notes.mjs`)は
@@ -856,6 +864,12 @@ git push -f origin vX.Y.Z
   残す(`sdk-tag` の後に起動するため)
 - **呼ぶジョブには、権限を 4 つとも書く**(`actions: write` を含む)。run の開始時に、
   飛ばされるジョブの権限まで検査される
+- **`tagpr-label.yml` は、リリース PR のラベルの付け外しで共通の `tagpr-label.yml` を呼ぶ。**
+  `pull_request_target` で動き、何も checkout しない。`tagpr.yml` を名前と
+  `workflow_dispatch` で起動するので、`tagpr.yml` の名前を変えず、`workflow_dispatch` を
+  外さない。動くのは開いているリリース PR のラベルだけである。マージ済みの PR に後から
+  `enhancement` を付けたときなどは動かないので、`gh workflow run tagpr.yml --ref master` で
+  作り直す
 - **`tagpr.yml` に `concurrency` を付けない。** run を並べるのは共通の workflow の
   tagpr のジョブ(`cancel-in-progress: false`、group は `tagpr-scripts-release-pr`)。
   呼ぶ側に同じ名前の group を付けると deadlock として止まる。別の名前でも、待っている
@@ -866,7 +880,7 @@ git push -f origin vX.Y.Z
 - **action は `.github/workflows/actions.lock`(workflow lockfile)でコミットに
   固定する。** `uses:` は完全な版のタグ(`@v7.0.1`)で書く。SHA を直接書かない
   (例外は別の repo の reusable workflow を呼ぶ行で、lockfile が固定しないので SHA で
-  書く。今あるのは `tagpr.yml` の 1 行。「scripts/tagpr」節)。tagpr など、共通の
+  書く。今あるのは `tagpr.yml` と `tagpr-label.yml` の 1 行ずつ。「scripts/tagpr」節)。tagpr など、共通の
   workflow の中の action は tagpr-scripts の `actions.lock` が固定する。
   Actions は lockfile にある commit で動かし、`verify-lockfile.yml` が PR と
   master への push で `gh actions-lock --verify` を走らせる
