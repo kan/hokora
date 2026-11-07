@@ -14,7 +14,8 @@ name: tagpr
 # - リリース PR がマージされると、次の run がマージコミットに annotated の vX.Y.Z を
 #   打ち、sdk-tag ジョブが同じコミットに sdk/vX.Y.Z を打ち、release ジョブが
 #   そのタグで release.yml を起動する。
-# - workflow_dispatch はリリース PR を作り直す(tagpr:minor を付けた後など)。
+# - workflow_dispatch はリリース PR を作り直す。リリース PR のラベル(tagpr:minor など)を
+#   付け外ししたときは、tagpr-label.yml がこれで起動する。名前と workflow_dispatch を変えない。
 on:
   push:
     branches: [master]
@@ -31,7 +32,7 @@ jobs:
     # **SHA は scripts/tagpr/ に取り込んだ tagpr-scripts の commit にする。** subtree を
     # 取り込む PR で一緒に上げる(AGENTS.md「scripts/tagpr」)。別の repo の reusable
     # workflow は actions.lock では固定されず、Dependabot には上げさせない(dependabot.yml)
-    uses: kan/tagpr-scripts/.github/workflows/tagpr.yml@966347b01e86b2aea4d71da0604588b17642b880
+    uses: kan/tagpr-scripts/.github/workflows/tagpr.yml@231fe768bce55eb24fed1e10a4b27907ebf7a306
     # 共通の workflow が使える権限の上限。4 つとも書く。actions: write は共通の
     # workflow の release ジョブの宣言のためで、release-workflow が空なのでそのジョブは
     # 走らない。足りないと、run が始まる前に権限の検査で落ちる

@@ -398,6 +398,10 @@ func TestWorkflowWritePermissionsAreConfinedToAllowedJobs(t *testing.T) {
 			"sdk-tag": {"contents"},
 			"release": {"actions"},
 		},
+		"tagpr-label.yml": {
+			// tagpr.yml の起動と、リリース PR を draft にするため。何も checkout しない
+			"rebuild": {"actions", "pull-requests"},
+		},
 	}
 	// 書き込み権限を持つジョブで、Go の依存やツールを取ってきて走らせる
 	// 兆候。ビルドは release.yml の build ジョブ(contents: read)だけで行う。
