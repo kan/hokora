@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -317,6 +318,13 @@ func TestReadStdinLimited(t *testing.T) {
 // ここで確かめるのは「シグナルが届くか」だけである。
 func TestNotifySIGHUP(t *testing.T) {
 	// シグナルはプロセス全体に届くので、並列にしない。
+	//
+	// 自分に送った SIGHUP は、kill が戻った後で別のスレッドへ届くことがある。
+	// notifySIGHUP が signal.Stop した後に届くと、SIGHUP は Go の既定の扱い
+	// (プロセスの終了)に戻っているので、テストのプロセスごと落ちる
+	// (CI で `signal: hangup` になった)。止めない受け口を残し、既定に戻さない。
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGHUP)
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
