@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The declared toolchain is now `go1.27.4`** (was `go1.27.3`). Go 1.27.4
+  (released 2026-11-10) contains security fixes to `net/http`, which hokora
+  uses for the Machine API and the Web UI, and to the `go` command, cgo, the
+  compiler and the linker. The `go` lines are unchanged; the SDK module still
+  declares `go 1.24`.
+
 ## [0.5.2] - 2026-11-05
 
 ### Changed

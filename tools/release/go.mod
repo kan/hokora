@@ -11,6 +11,8 @@ module github.com/kan/hokora/tools/release
 
 go 1.27.3
 
+toolchain go1.27.4
+
 tool github.com/goreleaser/goreleaser/v2
 
 require (
