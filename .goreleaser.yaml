@@ -11,14 +11,15 @@
 # GoReleaser is pinned in tools/release/go.mod. Validate locally with:
 #   make goreleaser-check
 #
-# GoReleaser only builds: release.yml runs it with --skip=publish and creates
-# the GitHub release from the files in dist/, so the build runs without the
+# GoReleaser only builds: kan/tagpr-scripts' build-go.yml (called from
+# release.yml) runs it with --skip=publish, and release-go.yml creates the
+# GitHub release from the files in dist/, so the build runs without the
 # permission to write to the repository.
 #
 # The build is reproducible: the same tag gives the same archives. Timestamps
 # come from the commit, not from the clock.
 #
-# vX.Y.Z and the SDK module's sdk/vX.Y.Z sit on the same commit. release.yml
+# vX.Y.Z and the SDK module's sdk/vX.Y.Z sit on the same commit. build-go.yml
 # names the version with GORELEASER_CURRENT_TAG. git.ignore_tags cannot do
 # this: v2.20.0 compares its entries exactly, so a glob such as "sdk/*" does
 # not keep the SDK tag out when GoReleaser picks the tag at HEAD.
@@ -59,8 +60,8 @@ builds:
 # Files would otherwise carry the time of the checkout, and the user and umask
 # of whoever ran the build. CREDITS holds the licenses of the root module's
 # dependencies (the whole module graph, so more than either binary links; NOTICE
-# lists what each one links). The release PR refreshes it (scripts/release-prepare.sh)
-# and release.yml checks it before building.
+# lists what each one links). The release PR refreshes it (release-prepare.mjs --credits)
+# and build-go.yml checks it before building.
 archives:
   - id: hokora
     ids: [hokora]
@@ -102,14 +103,16 @@ archives:
       - src: README.md
         info: *reproducible_info
 
+# Keep this name: build-go.yml attests the archives listed in
+# dist/checksums.txt, and release-go.yml uploads them.
 checksum:
   name_template: "checksums.txt"
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
-# GoReleaser only builds (release.yml runs it with --skip=publish). The release
-# notes are the CHANGELOG.md section of the version, which release.yml passes
-# to gh release create.
+# GoReleaser only builds (build-go.yml runs it with --skip=publish). The release
+# notes are the CHANGELOG.md section of the version, which build-go.yml
+# extracts and release-go.yml passes to gh release create.
 changelog:
   disable: true

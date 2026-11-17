@@ -5,9 +5,17 @@ name: release
 # 手で打ったタグのためにある。どちらでも github.ref はタグである(build provenance
 # がこれを記録する)。
 #
-# check ジョブがタグと CHANGELOG と CREDITS を確かめ、build ジョブが GoReleaser で
-# Linux amd64/arm64 の 2 バイナリをビルドして attestation を付け(.goreleaser.yaml)、
-# publish ジョブが CHANGELOG の節を本文にして Release を作る。
+# ビルドと Release は kan/tagpr-scripts の共通の workflow(scripts/tagpr/.github/workflows/
+# がその写し)。検査すること、入力、再実行の仕方は tagpr-scripts の README の
+# 「The Go release workflows」。
+#
+#   sdk-tag(この repo) -> build(build-go.yml) -> release(release-go.yml)
+#
+# - build-go.yml がタグと CHANGELOG と CREDITS を確かめ(読み取りだけ)、走っている Go が
+#   go.mod の toolchain 行と同じかを確かめ、GoReleaser で Linux amd64/arm64 の 2 バイナリを
+#   ビルドして attestation を付ける(.goreleaser.yaml)。GORELEASER_CURRENT_TAG にタグを
+#   渡すので、同じコミットの sdk/vX.Y.Z は版に使われない
+# - release-go.yml が CHANGELOG の節を本文にして Release を draft で作り、公開する
 on:
   push:
     tags:
@@ -19,32 +27,35 @@ permissions:
   contents: read
 
 # タグごとに 1 つ。止めない(Release を作っている途中で止まると、
-# 半端な Release が残る)。
+# 半端な Release が残る)。共通の workflow は concurrency を持たない。
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  # ビルドの前にタグを確かめる。読み取りの権限しか持たない。gocredits(依存の
-  # コード)は、attestation に署名できる build ジョブではなくここで走らせる。
-  check:
+  # **sdk タグを打たずにサーバーだけリリースすると、利用側の
+  # `go get github.com/kan/hokora/sdk` が壊れる**(AGENTS.md「リリースは
+  # タグが 2 系統になる」)。打ち忘れを沈黙させないよう、同じ番号の sdk タグが
+  # 同じコミットにあるかを検査する。sdk タグは tagpr.yml の sdk-tag ジョブが打つ。
+  #
+  # make toolchain-check もここで走らせる。build-go.yml が見るのは、走っている Go と
+  # root の go.mod の toolchain 行が同じかだけで、toolchain 行が無いことと、
+  # SUBMODULES(sdk/、tools/、tools/release/)の go.mod のずれは見ない。
+  sdk-tag:
+    name: Check the SDK tag and the toolchain
     # workflow_dispatch はブランチでも起動できるが、リリースはタグでだけ行う。
-    # ほかのジョブはすべてこのジョブに依存するので、この条件が全体を守る。
+    # ほかのジョブはすべてこのジョブに依存する(共通の workflow も同じ条件を持つ)。
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    outputs:
-      prerelease: ${{ steps.tag.outputs.prerelease }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          # sdk/vX.Y.Z のタグと、release-tag.mjs が読む origin/master を取る
-          fetch-depth: 0
+          fetch-depth: 0  # sdk/vX.Y.Z のタグを取る
           persist-credentials: false
 
-      # **sdk タグを打たずにサーバーだけリリースすると、利用側の
-      # `go get github.com/kan/hokora/sdk` が壊れる**(AGENTS.md「リリースは
-      # タグが 2 系統になる」)。打ち忘れを沈黙させないよう、同じ番号の sdk タグが
-      # 同じコミットにあるかを検査する。sdk タグは tagpr.yml の sdk-tag ジョブが打つ。
       - name: sdk タグの検査
         env:
           TAG: ${{ github.ref_name }}
@@ -61,146 +72,30 @@ jobs:
             exit 1
           fi
 
-      # タグが vX.Y.Z の形で、リリースのブランチ(.tagpr の releaseBranch)の上に
-      # あるか。ほかのブランチに手で打ったタグはここで止まる。prerelease= は
-      # release-notes.mjs が節を選ぶのと同じ規則で決まる。
-      - name: タグの検査
-        id: tag
-        env:
-          TAG: ${{ github.ref_name }}
-        run: node scripts/tagpr/release-tag.mjs "$TAG" >> "$GITHUB_OUTPUT"
-
-      # publish ジョブはこの節から Release の本文を作る。タグの節が無ければ、
-      # ビルドの前にここで止める。
-      - name: CHANGELOG の節の検査
-        env:
-          TAG: ${{ github.ref_name }}
-        run: node scripts/tagpr/release-notes.mjs "$TAG" > /dev/null
-
-      # キャッシュを使わない。別のワークフローが書いたキャッシュに、リリースを
-      # 進めるかどうかを決めさせない。
+      # キャッシュを使わない。go version を見るだけで、依存は取ってこない。
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
           cache: false
 
-      # リリース PR が CREDITS を作り直す(scripts/release-prepare.sh)。タグの
-      # CREDITS が作り直したものでなければ止める。
-      - name: CREDITS の検査
-        run: make credits-check
+      - name: toolchain
+        run: make toolchain-check
 
-  # リポジトリへの書き込み権限を持たずにビルドし、attestation を付ける。
+  # SHA は scripts/tagpr/ に取り込んだ tagpr-scripts の commit で、tagpr.yml と同じにする
+  # (verify-subtree.mjs がこれらの行も照合する)
   build:
-    needs: check
-    runs-on: ubuntu-latest
+    needs: sdk-tag
+    uses: kan/tagpr-scripts/.github/workflows/build-go.yml@f95892b128286dd1f84eea57f1e08a17e1f26eb3
     permissions:
       contents: read
       id-token: write           # attestation の署名に使う Sigstore の証明書
       attestations: write       # build provenance の attestation の保存
       artifact-metadata: write  # attestation を付けた成果物の記録
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          fetch-depth: 0  # GoReleaser が今のタグと前のタグを読む
-          persist-credentials: false
 
-      # キャッシュを使わない。別のワークフローが書いたキャッシュを、attestation を
-      # 付けるバイナリに届かせない。
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      # 「設定した」ではなく「効いている」を確かめる。setup-go は go.mod の
-      # `toolchain` 行を優先して入れる。リリース成果物が宣言どおりの処理系で
-      # ビルドされることを固定する。
-      - name: toolchain
-        run: make toolchain-check
-
-      # GoReleaser の版は tools/release/go.mod で固定し、go.sum で確かめる(同じタグの
-      # 再実行でも版が変わらない)。token は渡さない。何も publish せず、Release の
-      # 本文は publish ジョブが CHANGELOG.md から作る。
-      #
-      # 同じコミットに sdk/vX.Y.Z もあるので、版を明示する(.goreleaser.yaml の
-      # 冒頭。git.ignore_tags の glob では外せない)。
-      - name: build
-        env:
-          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
-        run: go tool -modfile=tools/release/go.mod goreleaser release --clean --skip=publish
-
-      # checksums.txt に全アーカイブが載るので、それぞれが subject になる。
-      - uses: actions/attest@v4.2.2
-        with:
-          subject-checksums: dist/checksums.txt
-
-      - uses: actions/upload-artifact@v7.0.2
-        with:
-          name: release-dist
-          path: |
-            dist/*.tar.gz
-            dist/checksums.txt
-          retention-days: 1
-          if-no-files-found: error
-
-  # build ジョブの成果物から Release を作る。ここでは何もビルドしない。
-  publish:
-    needs: [check, build]
-    runs-on: ubuntu-latest
+  release:
+    needs: build
+    uses: kan/tagpr-scripts/.github/workflows/release-go.yml@f95892b128286dd1f84eea57f1e08a17e1f26eb3
     permissions:
       contents: write  # Release の作成と公開
-    env:
-      TAG: ${{ github.ref_name }}
-      GH_REPO: ${{ github.repository }}
-      PRERELEASE: ${{ needs.check.outputs.prerelease }}
-    steps:
-      # scripts/tagpr/release-notes.mjs と CHANGELOG.md のため
-      - uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: actions/download-artifact@v8.0.2
-        with:
-          name: release-dist
-          path: dist
-
-      # release_state は、このジョブの前の試行が残したもの:
-      #   none      - 何も無い
-      #   draft     - 公開の前に落ちた。draft を作り直す
-      #   published - Release は済んでいる。何もしない
-      - name: 前の Release を探す
-        id: meta
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          state=none
-          if is_draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
-            state=published
-            if [ "$is_draft" = "true" ]; then
-              state=draft
-            fi
-          fi
-          echo "release_state=${state}" >> "$GITHUB_OUTPUT"
-
-      # アセットは draft に載せる。immutable releases を有効にしてあるので、公開した
-      # 後はアセットもタグも変えられない。本文はその版の CHANGELOG.md の節
-      # (プレリリースなら Unreleased)。check ジョブが節の有無を確かめてある。
-      - name: draft の Release を作る
-        if: steps.meta.outputs.release_state != 'published'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_STATE: ${{ steps.meta.outputs.release_state }}
-        run: |
-          if [ "$RELEASE_STATE" = draft ]; then
-            gh release delete "$TAG" --yes
-          fi
-
-          notes="$RUNNER_TEMP/release-notes.md"
-          node scripts/tagpr/release-notes.mjs "$TAG" > "$notes"
-          gh release create "$TAG" --draft --verify-tag --prerelease="$PRERELEASE" \
-            --title "$TAG" --notes-file "$notes" \
-            dist/*.tar.gz dist/checksums.txt
-
-      - name: Release を公開する
-        if: steps.meta.outputs.release_state != 'published'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$TAG" --draft=false
+    with:
+      prerelease: ${{ needs.build.outputs.prerelease }}
