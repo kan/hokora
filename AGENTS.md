@@ -531,8 +531,8 @@ hokora/
 ├── tools/               # 開発ツール専用の別 module(golangci-lint / govulncheck)
 │   └── release/         # リリースのツール専用の別 module(goreleaser / gocredits)
 ├── CREDITS              # root module の依存(module graph 全体)のライセンス。リリース PR が作り直す(手で直さない)
-├── scripts/release-prepare.sh  # .tagpr の postVersionCommand(「リリース手順」節)
-├── scripts/tagpr/       # kan/tagpr-scripts の git subtree。**中を編集しない**(「scripts/tagpr」節)
+├── scripts/tagpr/       # kan/tagpr-scripts の git subtree。**中を編集しない**(「scripts/tagpr」節)。
+│                        # .tagpr の postVersionCommand(release-prepare.mjs)もここ
 ├── .tagpr               # tagpr の設定(「リリース手順」節)
 └── docs/                # 設計文書と利用者向けマニュアル。**GitHub Pages の公開元**(下記)
 ```
@@ -759,11 +759,11 @@ git push -f origin vX.Y.Z
 
    - **最新の tagpr の run が success であること。** 失敗した run はリリース PR を
      draft にする(draft と ready の扱いは `scripts/tagpr/README.md` の
-     「The tagpr workflow」)。失敗していたら `scripts/release-prepare.sh`
+     「The tagpr workflow」)。失敗していたら `scripts/tagpr/release-prepare.mjs`
      (`.tagpr` の `postVersionCommand`)の出力を読む
-     - `TAGPR_ARTIFACT_DIR must hold the generated CREDITS file` なら、`tagpr.yml` の
-       `credits` のジョブが落ちたか、artifact を受け取れていない。`credits` のジョブを
-       直すか、run を再実行する
+     - `--credits needs TAGPR_ARTIFACT_DIR to hold the generated CREDITS file` なら、共通の
+       workflow の `Generate CREDITS` のジョブが落ちたか、artifact を受け取れていない。
+       そのジョブのログを見て直すか、run を再実行する
      - それ以外は `release-prepare.mjs` が CHANGELOG を拒んでいる。`## [Unreleased]` が
        空のまま tagpr が走ると落ちる(手で `gh workflow run tagpr.yml` を起動したときは、
        出すものが無くても tagpr が走る)。CHANGELOG を書く PR を master にマージすると
@@ -783,8 +783,8 @@ git push -f origin vX.Y.Z
      食い違ったままマージすると、タグは打たれるが `release.yml` が節を見つけられずに
      止まる
    - Files changed が `CHANGELOG.md`(見出しとリンク定義)と `CREDITS` だけであること
-     - `CREDITS` は `scripts/release-prepare.sh` が `tagpr.yml` の `credits` のジョブの
-       出力で差し替える。依存が変わっていなければ差分が無い
+     - `CREDITS` は `release-prepare.mjs --credits` が、共通の workflow が作った
+       ものに差し替える(`tagpr.yml` の `go-credits`)。依存が変わっていなければ差分が無い
    - 節を直すときは、リリース PR のブランチではなく **master の `## [Unreleased]` を
      直す**(ブランチは tagpr が作り直すたびに master から作られる)
    - 見出しの日付は、tagpr が最後にリリース PR を作り直した日(日本時間)。マージする
@@ -825,16 +825,27 @@ git push -f origin vX.Y.Z
 
 4. **Release の成果物と本文を確かめる**
 
-   `release.yml` は 3 つのジョブで動く。**書き込み権限を持つジョブではビルドしない。**
+   `release.yml` は 3 つのジョブで動く。`build` と `release` は kan/tagpr-scripts の
+   共通の workflow(`build-go.yml` / `release-go.yml`。kan/tagpr-scripts#17)を呼ぶ。
+   動きと再実行の仕方は `scripts/tagpr/README.md` の「The Go release workflows」。
+   **書き込み権限を持つジョブではビルドしない。**
 
-   - `check`(`contents: read` だけ): sdk タグ、タグの形と master の上にあるか
-     (`release-tag.mjs`。プレリリースかもここで決める)、CHANGELOG の節、`CREDITS` が
-     最新か(`make credits-check`)を確かめる。gocredits(依存のコード)は、attestation に
-     署名できる `build` ではなくここで走らせる
-   - `build`(`contents: read` と attestation の権限): GoReleaser で 4 つのアーカイブと
-     `checksums.txt` を作り、build provenance の attestation を付ける。GoReleaser に
-     token は渡さない
-   - `publish`(`contents: write`): Release を draft で作り、アセットを載せてから公開する
+   - `sdk-tag`(`contents: read` だけ): 同じ番号の sdk タグが同じコミットにあるかと、
+     `make toolchain-check`(toolchain 行があり、走っている Go と SUBMODULES の go.mod が揃っているか)を
+     確かめる
+   - `build`(`build-go.yml`): `check` のジョブ(`contents: read` だけ)で、タグの形と
+     master の上にあるか(`release-tag.mjs`。プレリリースかもここで決める)、CHANGELOG の節、
+     `CREDITS` が最新か(`make credits-check` と同じ gocredits の呼び方)を確かめる。
+     gocredits(依存のコード)は、attestation に署名できるジョブではなくここで走る。
+     続く `build` のジョブで、走っている Go が go.mod の toolchain 行(無ければ go 行)と
+     同じかを確かめ、GoReleaser で 4 つのアーカイブと `checksums.txt` を作り、build provenance の
+     attestation を付ける。GoReleaser に token は渡さない
+   - `release`(`release-go.yml`、`contents: write`): Release を draft で作り、アセットを
+     載せてから公開する
+
+   **attestation の署名元は `kan/tagpr-scripts/.github/workflows/build-go.yml`**。reusable workflow が
+   署名した attestation は、`gh attestation verify` に `--signer-workflow`(か `--signer-repo`)を
+   渡さないと通らない。0.5.4 までは hokora の `release.yml` が署名したので、`--repo` だけで確かめる。
 
    **immutable releases を有効にしてある。** 公開した Release のアセットとタグは変えられない
    (Release の削除はできる)。アセットを載せるのは draft の間だけである。**ビルドは
@@ -847,13 +858,14 @@ git push -f origin vX.Y.Z
 
    ```bash
    GOPROXY=https://proxy.golang.org go list -m github.com/kan/hokora/sdk@vX.Y.Z
-   gh attestation verify hokora_X.Y.Z_linux_amd64.tar.gz --repo kan/hokora
+   gh attestation verify hokora_X.Y.Z_linux_amd64.tar.gz --repo kan/hokora \
+     --signer-workflow kan/tagpr-scripts/.github/workflows/build-go.yml
    ```
 
    `release.yml` が失敗したら、`gh run rerun <run-id> --failed` で再実行する。
-   `publish` は前の試行が残した Release を見て、draft なら作り直し、公開済みなら何もしない
-   (Release を手で消さない)。**`build` が渡すアーカイブの artifact は 1 日で消える。**
-   1 日を過ぎたら `--failed` を付けずに run の全体を再実行する。再現可能なビルドなので、
+   `release` は前の試行が残した Release を見て、draft なら作り直し、公開済みなら何もしない
+   (Release を手で消さない)。**`build` が渡すアーカイブと本文の artifact は 7 日で消える。**
+   7 日を過ぎたら `--failed` を付けずに run の全体を再実行する。再現可能なビルドなので、
    同じアーカイブができる
 
 ### scripts/tagpr
@@ -870,8 +882,8 @@ git push -f origin vX.Y.Z
 
 - **取り込む PR はマージコミットでマージする。** squash すると subtree が前回の取り込みを
   見つけられず、次の `git subtree pull` が壊れる
-- **同じ PR で、`tagpr.yml` と `tagpr-label.yml` の `uses: kan/tagpr-scripts/...@<SHA>` の
-  SHA を上げる。** 2 つの行は同じ SHA にする。
+- **同じ PR で、`tagpr.yml`、`tagpr-label.yml`、`release.yml`(2 行)の
+  `uses: kan/tagpr-scripts/...@<SHA>` の SHA を上げる。** 4 つの行は同じ SHA にする。
   上げ先は squash のコミットにある `git-subtree-split` の SHA
   (取り込んだ tagpr-scripts の commit)。hokora 側の squash やマージのコミットの
   SHA と取り違えない
@@ -926,11 +938,13 @@ git push -f origin vX.Y.Z
 - **書き込み権限(`contents: write` など)は、要るジョブにだけ付ける。**
   ワークフローの既定は `contents: read`。**書き込み権限を持つジョブでビルドしない**
   (Go の依存やツールを取ってきて走らせない)。ビルドは `release.yml` の `build`
-  ジョブ(`contents: read` と attestation の権限)だけで行う。依存のコードを走らせる
-  `credits`(`tagpr.yml`)と `check`(`release.yml`)は `contents: read` だけを持つ
+  (共通の `build-go.yml`。`contents: read` と attestation の権限)だけで行う。依存のコードを
+  走らせる CREDITS の生成(`tagpr.yml` の `go-credits`)と検査(`build-go.yml` の `check`)は
+  `contents: read` だけを持つ
 - **`tagpr.yml` の `sdk-tag` と `release` の `if` から状態の関数(`!cancelled()`)を
-  外さない。** 外すと暗黙の `success()` が祖先の `credits` まで見るので、`credits` が
-  落ちたマージの run で sdk タグと Release が止まる
+  外さない。`sdk-tag` は `tagpr` の result ではなく `outputs.tag` で決める。** 共通の workflow の
+  中の CREDITS の生成が落ちると、タグを打った run でも `tagpr` の result は failure になる。
+  暗黙の `success()` がそれを見ると、sdk タグと Release が止まる
 
 ---
 

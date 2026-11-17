@@ -396,7 +396,7 @@ func TestWorkflowWritePermissionsAreConfinedToAllowedJobs(t *testing.T) {
 		"release.yml": {
 			// attestation の署名と保存
 			"build":   attestScopes,
-			"publish": {"contents"},
+			"release": {"contents"},
 		},
 		"tagpr.yml": {
 			// actions: write は共通の workflow の release ジョブの宣言のため

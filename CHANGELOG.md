@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The release archives are built and attested by the shared workflow of
+  [kan/tagpr-scripts](https://github.com/kan/tagpr-scripts).** The archives
+  are the same. The attestations are now signed by
+  `kan/tagpr-scripts/.github/workflows/build-go.yml`, so pass it to
+  `gh attestation verify` with `--signer-workflow` (see the README).
+
 ## [0.5.4] - 2026-11-17
 
 ### Added

@@ -185,7 +185,7 @@ goreleaser-check:
 
 # CREDITS(root module の依存のライセンス。gocredits は module graph の全体を並べるので、
 # バイナリにリンクされる依存より広い。リンクされるものは NOTICE にある)。リリース PR が
-# 作り直す(scripts/release-prepare.sh)ので、手で `make credits` してコミットしなくてよい。
+# 作り直す(tagpr.yml の go-credits と release-prepare.mjs --credits)ので、手で `make credits` してコミットしなくてよい。
 #
 # 一度ファイルへ書いてから比べる。パイプやリダイレクトで直に書くと、gocredits が
 # 落ちたときに「古い」と誤って出るか、CREDITS が空になる。
@@ -193,6 +193,8 @@ credits:
 	$(RELEASE_TOOL) gocredits . > CREDITS.tmp
 	mv CREDITS.tmp CREDITS
 
+# 手元の確かめ用。リリースでは kan/tagpr-scripts の build-go.yml が同じ gocredits の
+# 呼び方(tools/release/go.mod の gocredits を root で)で検査する。呼び方を変えるなら両方を変える。
 credits-check:
 	@$(RELEASE_TOOL) gocredits . > CREDITS.tmp
 	@diff CREDITS.tmp CREDITS \

@@ -8,8 +8,8 @@ name: tagpr
 # 扱いは tagpr-scripts の README の「The tagpr workflow」。
 #
 # - master への push のたびに、リリース PR(ブランチ tagpr-from-v<前の版>)を
-#   master の上に作り直す。scripts/release-prepare.sh が CHANGELOG の節を
-#   (scripts/tagpr/release-prepare.mjs で)書き換え、CREDITS を差し替える。
+#   master の上に作り直す。scripts/tagpr/release-prepare.mjs が CHANGELOG の節を
+#   書き換え、--credits で CREDITS を差し替える(下の go-credits)。
 #   落ちた run と成功した run でのリリース PR の扱い(draft と ready、
 #   前のリリース PR を閉じること)は、上の README の節にある。
 # - リリース PR がマージされると、次の run がマージコミットに annotated の vX.Y.Z を
@@ -29,48 +29,11 @@ permissions:
 # run を 1 つずつ並べる。呼ぶ側に同じ名前の group を付けると GitHub が deadlock として
 # 止め、別の名前でも、待っている run を置き換える場所が 2 つに増える。
 jobs:
-  # gocredits は依存のコードなので、読み取りのトークンしか持たないここで走らせ、
-  # 出力を artifact で tagpr のジョブへ渡す。リポジトリへ push できる tagpr の
-  # ジョブでは、依存のコードを何も走らせない。
-  credits:
-    name: Generate CREDITS
-    runs-on: ubuntu-latest
-    # tagpr のジョブはこのジョブを待つ。依存の取得が止まっても、タグ打ちを長く止めない
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-
-      # キャッシュを使わない。別のワークフローが書いたキャッシュを、tagpr のジョブが
-      # コミットするものに届かせない。
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-
-      - name: Generate CREDITS
-        run: |
-          mkdir -p "$RUNNER_TEMP/credits"
-          go tool -modfile=tools/release/go.mod gocredits . > "$RUNNER_TEMP/credits/CREDITS"
-
-      - uses: actions/upload-artifact@v7.0.2
-        with:
-          name: credits
-          path: ${{ runner.temp }}/credits/CREDITS
-          retention-days: 1
-          if-no-files-found: error
-
   tagpr:
-    needs: credits
-    # マージされたリリース PR にタグを打つ run は CREDITS を使わないので、credits の
-    # ジョブが落ちてもタグを打てるようにする。artifact が無ければ
-    # scripts/release-prepare.sh が何も書かずに落ちる。
-    if: ${{ !cancelled() }}
     # **SHA は scripts/tagpr/ に取り込んだ tagpr-scripts の commit にする。** subtree を
     # 取り込む PR で一緒に上げる(AGENTS.md「scripts/tagpr」)。別の repo の reusable
     # workflow は actions.lock では固定されず、Dependabot には上げさせない(dependabot.yml)
-    uses: kan/tagpr-scripts/.github/workflows/tagpr.yml@73d904c9627a1c81c28c7966019867cb2d4fb253
+    uses: kan/tagpr-scripts/.github/workflows/tagpr.yml@f95892b128286dd1f84eea57f1e08a17e1f26eb3
     # 共通の workflow が使える権限の上限。4 つとも書く。actions: write は共通の
     # workflow の release ジョブの宣言のためで、release-workflow が空なのでそのジョブは
     # 走らない。足りないと、run が始まる前に権限の検査で落ちる
@@ -83,8 +46,10 @@ jobs:
     # (下の release ジョブが起動する)
     with:
       release-workflow: ''
-      # scripts/release-prepare.sh が TAGPR_ARTIFACT_DIR/CREDITS として読む
-      artifact: credits
+      # gocredits(依存のコード)は共通の workflow の読み取りだけのジョブで走り、
+      # release-prepare.mjs --credits(.tagpr)がその出力を写す。push できるジョブでは
+      # 依存のコードを走らせない
+      go-credits: true
 
   # tagpr は vX.Y.Z しか打たないので、ここで同じコミットに sdk/vX.Y.Z を打つ
   # (AGENTS.md「リリースはタグが 2 系統になる」)。再実行してよい。既に同じ
@@ -92,9 +57,11 @@ jobs:
   sdk-tag:
     name: Tag the SDK module
     needs: tagpr
-    # **状態の関数を省かない。** 省くと暗黙の success() が祖先の credits まで見るので、
-    # credits が落ちたマージの run で sdk タグが打たれなくなる。見るのは tagpr の結果だけ
-    if: ${{ !cancelled() && needs.tagpr.result == 'success' && needs.tagpr.outputs.tag != '' }}
+    # **tagpr の結果(result)ではなく、打ったタグ(outputs.tag)で決める。** 共通の
+    # workflow の中の CREDITS の生成が落ちると、タグを打った run でも tagpr の result は
+    # failure になる。状態の関数を省くと暗黙の success() がそれを見て、sdk タグが
+    # 打たれなくなる
+    if: ${{ !cancelled() && needs.tagpr.outputs.tag != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

@@ -158,8 +158,12 @@ were built by GitHub Actions from this repository's tag. Check a downloaded
 archive with:
 
 ```bash
-gh attestation verify hokora_<version>_linux_amd64.tar.gz --repo kan/hokora
+gh attestation verify hokora_<version>_linux_amd64.tar.gz --repo kan/hokora \
+  --signer-workflow kan/tagpr-scripts/.github/workflows/build-go.yml
 ```
+
+Up to 0.5.4 the archives were signed by another workflow: leave out
+`--signer-workflow` for them.
 
 From source (Go 1.27+; `go.mod` declares `toolchain go1.27.4`, which
 `GOTOOLCHAIN=auto` fetches automatically):
