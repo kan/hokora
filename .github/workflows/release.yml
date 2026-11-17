@@ -2,10 +2,12 @@ name: release
 
 # tagpr.yml が、tagpr の打ったタグを ref にして workflow_dispatch で起動する
 # (GITHUB_TOKEN で push したタグでは push が起動しない)。push のトリガは、
-# 手で打ったタグのためにある。どちらでも github.ref はタグである。
+# 手で打ったタグのためにある。どちらでも github.ref はタグである(build provenance
+# がこれを記録する)。
 #
-# build ジョブが GoReleaser で Linux amd64/arm64 の 2 バイナリをビルドし
-# (.goreleaser.yaml)、publish ジョブが CHANGELOG の節を本文にして Release を作る。
+# check ジョブがタグと CHANGELOG と CREDITS を確かめ、build ジョブが GoReleaser で
+# Linux amd64/arm64 の 2 バイナリをビルドして attestation を付け(.goreleaser.yaml)、
+# publish ジョブが CHANGELOG の節を本文にして Release を作る。
 on:
   push:
     tags:
@@ -23,16 +25,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # リポジトリへの書き込み権限を持たずにビルドする。
-  build:
+  # ビルドの前にタグを確かめる。読み取りの権限しか持たない。gocredits(依存の
+  # コード)は、attestation に署名できる build ジョブではなくここで走らせる。
+  check:
     # workflow_dispatch はブランチでも起動できるが、リリースはタグでだけ行う。
-    # publish はこのジョブに依存するので、この条件が両方を守る。
+    # ほかのジョブはすべてこのジョブに依存するので、この条件が全体を守る。
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.tag.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          fetch-depth: 0  # タグ(sdk/vX.Y.Z を含む)を取る
+          # sdk/vX.Y.Z のタグと、release-tag.mjs が読む origin/master を取る
+          fetch-depth: 0
           persist-credentials: false
 
       # **sdk タグを打たずにサーバーだけリリースすると、利用側の
@@ -55,6 +61,15 @@ jobs:
             exit 1
           fi
 
+      # タグが vX.Y.Z の形で、リリースのブランチ(.tagpr の releaseBranch)の上に
+      # あるか。ほかのブランチに手で打ったタグはここで止まる。prerelease= は
+      # release-notes.mjs が節を選ぶのと同じ規則で決まる。
+      - name: タグの検査
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/tagpr/release-tag.mjs "$TAG" >> "$GITHUB_OUTPUT"
+
       # publish ジョブはこの節から Release の本文を作る。タグの節が無ければ、
       # ビルドの前にここで止める。
       - name: CHANGELOG の節の検査
@@ -62,8 +77,35 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: node scripts/tagpr/release-notes.mjs "$TAG" > /dev/null
 
-      # キャッシュを使わない。別のワークフローが書いたキャッシュを、リリースの
-      # バイナリに届かせない。
+      # キャッシュを使わない。別のワークフローが書いたキャッシュに、リリースを
+      # 進めるかどうかを決めさせない。
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # リリース PR が CREDITS を作り直す(scripts/release-prepare.sh)。タグの
+      # CREDITS が作り直したものでなければ止める。
+      - name: CREDITS の検査
+        run: make credits-check
+
+  # リポジトリへの書き込み権限を持たずにビルドし、attestation を付ける。
+  build:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write           # attestation の署名に使う Sigstore の証明書
+      attestations: write       # build provenance の attestation の保存
+      artifact-metadata: write  # attestation を付けた成果物の記録
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0  # GoReleaser が今のタグと前のタグを読む
+          persist-credentials: false
+
+      # キャッシュを使わない。別のワークフローが書いたキャッシュを、attestation を
+      # 付けるバイナリに届かせない。
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
@@ -74,18 +116,21 @@ jobs:
       - name: toolchain
         run: make toolchain-check
 
-      # GoReleaser の版は tools/release/go.mod で固定し、go.sum で確かめる。
-      # Release の作成は publish ジョブに任せる。本文は GoReleaser ではなく
-      # CHANGELOG.md から作る。
+      # GoReleaser の版は tools/release/go.mod で固定し、go.sum で確かめる(同じタグの
+      # 再実行でも版が変わらない)。token は渡さない。何も publish せず、Release の
+      # 本文は publish ジョブが CHANGELOG.md から作る。
       #
       # 同じコミットに sdk/vX.Y.Z もあるので、版を明示する(.goreleaser.yaml の
       # 冒頭。git.ignore_tags の glob では外せない)。
       - name: build
         env:
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
-        run: |
-          make bin/goreleaser
-          bin/goreleaser release --clean --skip=publish
+        run: go tool -modfile=tools/release/go.mod goreleaser release --clean --skip=publish
+
+      # checksums.txt に全アーカイブが載るので、それぞれが subject になる。
+      - uses: actions/attest@v4.2.2
+        with:
+          subject-checksums: dist/checksums.txt
 
       - uses: actions/upload-artifact@v7.0.2
         with:
@@ -98,13 +143,14 @@ jobs:
 
   # build ジョブの成果物から Release を作る。ここでは何もビルドしない。
   publish:
-    needs: build
+    needs: [check, build]
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Release の作成
+      contents: write  # Release の作成と公開
     env:
       TAG: ${{ github.ref_name }}
       GH_REPO: ${{ github.repository }}
+      PRERELEASE: ${{ needs.check.outputs.prerelease }}
     steps:
       # scripts/tagpr/release-notes.mjs と CHANGELOG.md のため
       - uses: actions/checkout@v7.0.1
@@ -116,15 +162,45 @@ jobs:
           name: release-dist
           path: dist
 
-      # その版の CHANGELOG.md の節(プレリリースなら Unreleased)。build ジョブが
-      # 節の有無を確かめてある。
-      - name: Create release
+      # release_state は、このジョブの前の試行が残したもの:
+      #   none      - 何も無い
+      #   draft     - 公開の前に落ちた。draft を作り直す
+      #   published - Release は済んでいる。何もしない
+      - name: 前の Release を探す
+        id: meta
         env:
           GH_TOKEN: ${{ github.token }}
-          PRERELEASE: ${{ contains(github.ref_name, '-') }}
         run: |
+          state=none
+          if is_draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            state=published
+            if [ "$is_draft" = "true" ]; then
+              state=draft
+            fi
+          fi
+          echo "release_state=${state}" >> "$GITHUB_OUTPUT"
+
+      # アセットは draft に載せる。immutable releases を有効にしてあるので、公開した
+      # 後はアセットもタグも変えられない。本文はその版の CHANGELOG.md の節
+      # (プレリリースなら Unreleased)。check ジョブが節の有無を確かめてある。
+      - name: draft の Release を作る
+        if: steps.meta.outputs.release_state != 'published'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_STATE: ${{ steps.meta.outputs.release_state }}
+        run: |
+          if [ "$RELEASE_STATE" = draft ]; then
+            gh release delete "$TAG" --yes
+          fi
+
           notes="$RUNNER_TEMP/release-notes.md"
           node scripts/tagpr/release-notes.mjs "$TAG" > "$notes"
-          gh release create "$TAG" --verify-tag --prerelease="$PRERELEASE" \
+          gh release create "$TAG" --draft --verify-tag --prerelease="$PRERELEASE" \
             --title "$TAG" --notes-file "$notes" \
             dist/*.tar.gz dist/checksums.txt
+
+      - name: Release を公開する
+        if: steps.meta.outputs.release_state != 'published'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$TAG" --draft=false

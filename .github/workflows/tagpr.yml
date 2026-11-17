@@ -8,8 +8,9 @@ name: tagpr
 # 扱いは tagpr-scripts の README の「The tagpr workflow」。
 #
 # - master への push のたびに、リリース PR(ブランチ tagpr-from-v<前の版>)を
-#   master の上に作り直す。CHANGELOG の節は scripts/tagpr/release-prepare.mjs が
-#   書き換える。落ちた run と成功した run でのリリース PR の扱い(draft と ready、
+#   master の上に作り直す。scripts/release-prepare.sh が CHANGELOG の節を
+#   (scripts/tagpr/release-prepare.mjs で)書き換え、CREDITS を差し替える。
+#   落ちた run と成功した run でのリリース PR の扱い(draft と ready、
 #   前のリリース PR を閉じること)は、上の README の節にある。
 # - リリース PR がマージされると、次の run がマージコミットに annotated の vX.Y.Z を
 #   打ち、sdk-tag ジョブが同じコミットに sdk/vX.Y.Z を打ち、release ジョブが
@@ -28,7 +29,44 @@ permissions:
 # run を 1 つずつ並べる。呼ぶ側に同じ名前の group を付けると GitHub が deadlock として
 # 止め、別の名前でも、待っている run を置き換える場所が 2 つに増える。
 jobs:
+  # gocredits は依存のコードなので、読み取りのトークンしか持たないここで走らせ、
+  # 出力を artifact で tagpr のジョブへ渡す。リポジトリへ push できる tagpr の
+  # ジョブでは、依存のコードを何も走らせない。
+  credits:
+    name: Generate CREDITS
+    runs-on: ubuntu-latest
+    # tagpr のジョブはこのジョブを待つ。依存の取得が止まっても、タグ打ちを長く止めない
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      # キャッシュを使わない。別のワークフローが書いたキャッシュを、tagpr のジョブが
+      # コミットするものに届かせない。
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Generate CREDITS
+        run: |
+          mkdir -p "$RUNNER_TEMP/credits"
+          go tool -modfile=tools/release/go.mod gocredits . > "$RUNNER_TEMP/credits/CREDITS"
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: credits
+          path: ${{ runner.temp }}/credits/CREDITS
+          retention-days: 1
+          if-no-files-found: error
+
   tagpr:
+    needs: credits
+    # マージされたリリース PR にタグを打つ run は CREDITS を使わないので、credits の
+    # ジョブが落ちてもタグを打てるようにする。artifact が無ければ
+    # scripts/release-prepare.sh が何も書かずに落ちる。
+    if: ${{ !cancelled() }}
     # **SHA は scripts/tagpr/ に取り込んだ tagpr-scripts の commit にする。** subtree を
     # 取り込む PR で一緒に上げる(AGENTS.md「scripts/tagpr」)。別の repo の reusable
     # workflow は actions.lock では固定されず、Dependabot には上げさせない(dependabot.yml)
@@ -45,6 +83,8 @@ jobs:
     # (下の release ジョブが起動する)
     with:
       release-workflow: ''
+      # scripts/release-prepare.sh が TAGPR_ARTIFACT_DIR/CREDITS として読む
+      artifact: credits
 
   # tagpr は vX.Y.Z しか打たないので、ここで同じコミットに sdk/vX.Y.Z を打つ
   # (AGENTS.md「リリースはタグが 2 系統になる」)。再実行してよい。既に同じ
@@ -52,7 +92,9 @@ jobs:
   sdk-tag:
     name: Tag the SDK module
     needs: tagpr
-    if: needs.tagpr.outputs.tag != ''
+    # **状態の関数を省かない。** 省くと暗黙の success() が祖先の credits まで見るので、
+    # credits が落ちたマージの run で sdk タグが打たれなくなる。見るのは tagpr の結果だけ
+    if: ${{ !cancelled() && needs.tagpr.result == 'success' && needs.tagpr.outputs.tag != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -114,10 +156,11 @@ jobs:
   #
   # release.yml は sdk/vX.Y.Z が同じコミットにあることを検査するので、
   # sdk-tag の後に起動する。sdk-tag が飛ばされたか失敗したら、このジョブも
-  # 走らない(if を書かないときの既定)。
+  # 走らない。状態の関数を省かない理由は sdk-tag と同じ。
   release:
     name: Start the release
     needs: [tagpr, sdk-tag]
+    if: ${{ !cancelled() && needs.sdk-tag.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

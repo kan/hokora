@@ -1,4 +1,5 @@
-// リリースのツール(goreleaser)専用の module。
+// リリースのツール(goreleaser / gocredits)専用の module。repo root で
+// `go tool -modfile=tools/release/go.mod <tool>` として呼ぶ(Makefile の RELEASE_TOOL)。
 //
 // tools/(golangci-lint / govulncheck)と分けてあるのは、build list を共有させない
 // ためである。同じ module に置くと、goreleaser の依存が MVS で lint の依存版を
@@ -11,7 +12,10 @@ module github.com/kan/hokora/tools/release
 
 go 1.27.4
 
-tool github.com/goreleaser/goreleaser/v2
+tool (
+	github.com/Songmu/gocredits/cmd/gocredits
+	github.com/goreleaser/goreleaser/v2
+)
 
 require (
 	al.essio.dev/pkg/shellescape v1.6.0 // indirect
@@ -56,6 +60,7 @@ require (
 	github.com/Masterminds/sprig/v3 v3.3.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProtonMail/go-crypto v1.5.2 // indirect
+	github.com/Songmu/gocredits v1.1.0 // indirect
 	github.com/agnivade/levenshtein v1.2.2 // indirect
 	github.com/anchore/go-macholibre v0.0.0-20250826193721-3cd206ca93aa // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect

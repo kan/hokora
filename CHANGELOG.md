@@ -7,8 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The release archives carry a build provenance attestation.**
+  `gh attestation verify <archive> --repo kan/hokora` confirms that GitHub
+  Actions built it from this repository's tag.
+- **The release archives include `CREDITS`**, the licenses of the root
+  module's dependencies (`NOTICE` still lists what each binary links). The SDK module now has its own `LICENSE` and
+  `NOTICE` (`sdk/`), so its module zip carries the Apache-2.0 NOTICE as well.
+
 ### Changed
 
+- **The release archives are reproducible.** The same tag gives the same
+  archives (the values in `checksums.txt`). Files in the archives carry the
+  commit's time and root as their owner, and the binaries' modification time is
+  the commit's.
 - **`modernc.org/sqlite` 1.61.1 → 1.62.0** (with `modernc.org/libc` 1.79.0 →
   1.80.1). The bundled SQLite stays 3.54.1. The release adds an illumos/amd64
   port and opt-in features hokora does not enable. No hokora code changes; the

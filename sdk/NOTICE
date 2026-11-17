@@ -1,0 +1,5 @@
+hokora SDK (github.com/kan/hokora/sdk)
+Copyright 2026 Kan Fushihara
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+It links only the Go standard library.
