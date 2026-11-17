@@ -432,7 +432,7 @@ toolchain go1.27.4
 | `toolchain` 行、root / `tools/` の `go` 行 | `make toolchain-latest`(go.dev の最新の安定版と突き合わせる)。`.github/workflows/toolchain.yml` が週次と手動実行で回す |
 | root の依存 | Dependabot(`directory: /`) |
 | `tools/` のツール本体(golangci-lint / govulncheck) | Dependabot(`directory: /tools`、`allow` で `dependency-type: all`) |
-| `tools/release/` のツール本体(goreleaser) | Dependabot(`directory: /tools/release`、同上) |
+| `tools/release/` のツール本体(goreleaser / gocredits) | Dependabot(`directory: /tools/release`、同上) |
 | GitHub Actions(`uses:` と `actions.lock`) | Dependabot(`package-ecosystem: github-actions`) |
 
 - **Dependabot は `toolchain` 行を上げない。** Go 本体の更新を Dependabot の
@@ -471,14 +471,20 @@ toolchain go1.27.4
 - `github.com/golangci/golangci-lint/v2/cmd/golangci-lint`
 - `golang.org/x/vuln/cmd/govulncheck`
 
-リリースのビルドに使う `github.com/goreleaser/goreleaser/v2` は、
-**`tools/release/go.mod`** で固定する。`release.yml` の build ジョブが
-`make bin/goreleaser` でビルドして使う。**リリースのたびに版を固定しない
-goreleaser を取ってこない**(go.sum でハッシュを確かめ、Dependabot に版を
-追わせるため)。**goreleaser を `tools/go.mod` に入れない。** 同じ module に
-置くと、goreleaser の依存が MVS で golangci-lint の依存版を引き上げ、
+リリースに使う `github.com/goreleaser/goreleaser/v2` と
+`github.com/Songmu/gocredits/cmd/gocredits` は、**`tools/release/go.mod`** で固定する。
+repo root で `go tool -modfile=tools/release/go.mod <tool>` として呼ぶ(Makefile の
+`RELEASE_TOOL`。`release.yml` と `tagpr.yml` も同じ形)。`-C tools/release` では呼ばない。
+gocredits が tools/release の依存を読み、goreleaser が tools/release をビルドしようとするため。
+**リリースのたびに版を固定しない goreleaser を取ってこない**(go.sum でハッシュを
+確かめ、Dependabot に版を追わせるため)。**goreleaser を `tools/go.mod` に入れない。**
+同じ module に置くと、goreleaser の依存が MVS で golangci-lint の依存版を引き上げ、
 goreleaser の更新が lint を動かす(一度入れて、viper や prometheus の版が
 動いた)。
+
+**go.mod と go.sum は tidy にしておく。** リリースは tidy しない(`.goreleaser.yaml` の
+`before.hooks` はタグの tree を書き換えない)。CI が `make tidy-check`(root / sdk /
+tools)と `make goreleaser-check`(tools/release)で全 module を確かめる。
 
 これらは `go build` の成果物には入らない。**しかし root の `go.mod` に置くと、
 ツールの indirect(200 module 超)が root の go.mod に列挙され、SDK しか
@@ -521,8 +527,11 @@ hokora/
 ├── static/              # style.css, bfcache.js
 ├── cmd/hokora-client/   # クライアント専用バイナリ(get / run)。標準ライブラリ + sdk のみ
 ├── sdk/                 # 外部から import される Go SDK。**別 module**(依存ゼロ)
+│                        # sdk/LICENSE は root の LICENSE の写し(license_files_test.go が一致を見る)
 ├── tools/               # 開発ツール専用の別 module(golangci-lint / govulncheck)
-│   └── release/         # リリースのツール専用の別 module(goreleaser)
+│   └── release/         # リリースのツール専用の別 module(goreleaser / gocredits)
+├── CREDITS              # root module の依存(module graph 全体)のライセンス。リリース PR が作り直す(手で直さない)
+├── scripts/release-prepare.sh  # .tagpr の postVersionCommand(「リリース手順」節)
 ├── scripts/tagpr/       # kan/tagpr-scripts の git subtree。**中を編集しない**(「scripts/tagpr」節)
 ├── .tagpr               # tagpr の設定(「リリース手順」節)
 └── docs/                # 設計文書と利用者向けマニュアル。**GitHub Pages の公開元**(下記)
@@ -590,7 +599,7 @@ sdk のみ」を不変条件として検査する)。**`cmd/<name>/` を増や�
 | root(`github.com/kan/hokora`) | サーバー本体・クライアントバイナリ | 1.27(最新の minor に追随) |
 | `sdk/` | アプリに配る Go SDK。**依存ゼロ** | **1.24**(低く保つ) |
 | `tools/` | 開発ツール(lint / vuln)。成果物に入らない | 1.27(root と揃える) |
-| `tools/release/` | リリースのツール(goreleaser)。成果物に入らない。lint と build list を共有させないため `tools/` と分ける | 1.27(root と揃える。goreleaser が patch まで要求すれば patch 付き) |
+| `tools/release/` | リリースのツール(goreleaser / gocredits)。成果物に入らない。lint と build list を共有させないため `tools/` と分ける | 1.27(root と揃える。goreleaser が patch まで要求すれば patch 付き) |
 
 **分離の理由は、利用側の module graph と go 行の強制を切り離すことにある。**
 単一 module だと、SDK しか import していないアプリにも
@@ -750,10 +759,15 @@ git push -f origin vX.Y.Z
 
    - **最新の tagpr の run が success であること。** 失敗した run はリリース PR を
      draft にする(draft と ready の扱いは `scripts/tagpr/README.md` の
-     「The tagpr workflow」)。失敗していたら
-     `release-prepare.mjs` の出力を読む。`## [Unreleased]` が空のまま tagpr が走ると
-     落ちる(手で `gh workflow run tagpr.yml` を起動したときは、出すものが無くても
-     tagpr が走る)。CHANGELOG を書く PR を master にマージすると作り直される
+     「The tagpr workflow」)。失敗していたら `scripts/release-prepare.sh`
+     (`.tagpr` の `postVersionCommand`)の出力を読む
+     - `TAGPR_ARTIFACT_DIR must hold the generated CREDITS file` なら、`tagpr.yml` の
+       `credits` のジョブが落ちたか、artifact を受け取れていない。`credits` のジョブを
+       直すか、run を再実行する
+     - それ以外は `release-prepare.mjs` が CHANGELOG を拒んでいる。`## [Unreleased]` が
+       空のまま tagpr が走ると落ちる(手で `gh workflow run tagpr.yml` を起動したときは、
+       出すものが無くても tagpr が走る)。CHANGELOG を書く PR を master にマージすると
+       作り直される
    - **版(PR のタイトル)が正しいこと。** 既定は patch。前回のリリース以降に
      マージした PR が `enhancement` ラベルを持っていれば minor になる
      (`.tagpr` の `minorLabels`)。手で変えるときはリリース PR にラベルを付ける。
@@ -768,7 +782,9 @@ git push -f origin vX.Y.Z
      マージの時点のラベルで決まり、見出しは最後に作り直した時点の版のまま。
      食い違ったままマージすると、タグは打たれるが `release.yml` が節を見つけられずに
      止まる
-   - Files changed が `CHANGELOG.md`(見出しとリンク定義)だけであること
+   - Files changed が `CHANGELOG.md`(見出しとリンク定義)と `CREDITS` だけであること
+     - `CREDITS` は `scripts/release-prepare.sh` が `tagpr.yml` の `credits` のジョブの
+       出力で差し替える。依存が変わっていなければ差分が無い
    - 節を直すときは、リリース PR のブランチではなく **master の `## [Unreleased]` を
      直す**(ブランチは tagpr が作り直すたびに master から作られる)
    - 見出しの日付は、tagpr が最後にリリース PR を作り直した日(日本時間)。マージする
@@ -809,19 +825,36 @@ git push -f origin vX.Y.Z
 
 4. **Release の成果物と本文を確かめる**
 
-   `release.yml` の `build` ジョブ(`contents: read`)が GoReleaser で 4 つの
-   アーカイブと `checksums.txt` を作り、`publish` ジョブ(`contents: write`)が
-   Release を作る。**書き込み権限を持つジョブではビルドしない。**
+   `release.yml` は 3 つのジョブで動く。**書き込み権限を持つジョブではビルドしない。**
+
+   - `check`(`contents: read` だけ): sdk タグ、タグの形と master の上にあるか
+     (`release-tag.mjs`。プレリリースかもここで決める)、CHANGELOG の節、`CREDITS` が
+     最新か(`make credits-check`)を確かめる。gocredits(依存のコード)は、attestation に
+     署名できる `build` ではなくここで走らせる
+   - `build`(`contents: read` と attestation の権限): GoReleaser で 4 つのアーカイブと
+     `checksums.txt` を作り、build provenance の attestation を付ける。GoReleaser に
+     token は渡さない
+   - `publish`(`contents: write`): Release を draft で作り、アセットを載せてから公開する
+
+   **immutable releases を有効にしてある。** 公開した Release のアセットとタグは変えられない
+   (Release の削除はできる)。アセットを載せるのは draft の間だけである。**ビルドは
+   再現可能にしてある**(`.goreleaser.yaml` の `-trimpath`、`mod_timestamp`、アーカイブ内の
+   時刻と所有者)。再実行で同じアーカイブができる。GoReleaser の版を上げるとアーカイブの
+   バイトが変わりうるので、上げるのはリリースの間にする。
+
    Release の本文は `node scripts/tagpr/release-notes.mjs vX.Y.Z` の出力と同じ。
-   あわせて、sdk タグが解決できることを確かめる
+   あわせて、sdk タグが解決できることと、attestation を確かめる
 
    ```bash
    GOPROXY=https://proxy.golang.org go list -m github.com/kan/hokora/sdk@vX.Y.Z
+   gh attestation verify hokora_X.Y.Z_linux_amd64.tar.gz --repo kan/hokora
    ```
 
    `release.yml` が失敗したら、`gh run rerun <run-id> --failed` で再実行する。
-   `publish` が Release を作った後で失敗していたら、その Release を消してから
-   再実行する(`gh release create` は同じタグの Release があると失敗する)
+   `publish` は前の試行が残した Release を見て、draft なら作り直し、公開済みなら何もしない
+   (Release を手で消さない)。**`build` が渡すアーカイブの artifact は 1 日で消える。**
+   1 日を過ぎたら `--failed` を付けずに run の全体を再実行する。再現可能なビルドなので、
+   同じアーカイブができる
 
 ### scripts/tagpr
 
@@ -893,7 +926,11 @@ git push -f origin vX.Y.Z
 - **書き込み権限(`contents: write` など)は、要るジョブにだけ付ける。**
   ワークフローの既定は `contents: read`。**書き込み権限を持つジョブでビルドしない**
   (Go の依存やツールを取ってきて走らせない)。ビルドは `release.yml` の `build`
-  ジョブ(`contents: read`)だけで行う
+  ジョブ(`contents: read` と attestation の権限)だけで行う。依存のコードを走らせる
+  `credits`(`tagpr.yml`)と `check`(`release.yml`)は `contents: read` だけを持つ
+- **`tagpr.yml` の `sdk-tag` と `release` の `if` から状態の関数(`!cancelled()`)を
+  外さない。** 外すと暗黙の `success()` が祖先の `credits` まで見るので、`credits` が
+  落ちたマージの run で sdk タグと Release が止まる
 
 ---
 
@@ -949,10 +986,12 @@ M7(リリース準備)
 (品質レビューがソースを直す一方でテスト作成が同じソースを読むため、
 編集が競合する)。
 
-1. **`make all`**(`toolchain-check` → `fmt-check` → `docs-check` → `vet` → `lint` → `test` → `build`)を通す。
-   `.github/workflows/ci.yml` と同じ内容なので、ここで落ちるものは push
+1. **`make all`**(`toolchain-check` → `fmt-check` → `tidy-check` → `docs-check` → `vet` → `lint` → `test` → `build`)を通す。
+   `.github/workflows/ci.yml` の test / lint ジョブと同じ内容なので、ここで落ちるものは push
    しても落ちる。**依存を足した / 更新したときは `make vuln` も回す**
-   (脆弱性検査は `vuln.yml` に分離してあり、`make all` には含まれない)
+   (脆弱性検査は `vuln.yml` に分離してあり、`make all` には含まれない)。
+   **`.goreleaser.yaml` か `tools/release/` を変えたときは `make goreleaser-check` も回す**
+   (ci.yml の goreleaser-check ジョブと同じ。`make all` には含まれない)
 2. **コード品質レビュー**を変更差分に対して実行し、指摘を反映する。
    Claude Code なら `/simplify` スキル。他のエージェントでも、
    再利用性・簡潔性・効率・実装の深さを見る同等の工程であればよい

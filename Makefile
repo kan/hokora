@@ -15,9 +15,10 @@ SUBMODULES := tools/go.mod tools/release/go.mod sdk/go.mod
 MODULES := . sdk
 
 .PHONY: all build build-client test vet fmt fmt-check lint vuln tidy clean \
-        toolchain-check toolchain-latest docs-check docs-screenshots goreleaser-check
+        toolchain-check toolchain-latest docs-check docs-screenshots goreleaser-check \
+        credits credits-check tidy-check
 
-all: toolchain-check fmt-check docs-check vet lint test build
+all: toolchain-check fmt-check tidy-check docs-check vet lint test build
 
 # docs/ は GitHub Pages(Jekyll)の公開元である。front matter の無い Markdown も
 # 全てページになり、**本文は Liquid として解釈される。** 波括弧 2 つの式は
@@ -169,16 +170,42 @@ $(BINDIR)/govulncheck: tools/go.mod tools/go.sum
 	$(GO) build -C tools -o ../$(BINDIR)/govulncheck \
 		golang.org/x/vuln/cmd/govulncheck
 
-# リリースのビルド(release.yml の build ジョブ)が使う。版は tools/release/go.mod
-# で固定し、go.sum でハッシュを確かめる。lint / vuln とは別 module である
-# (tools/release/go.mod の冒頭)。
-$(BINDIR)/goreleaser: tools/release/go.mod tools/release/go.sum
-	$(GO) build -C tools/release -o ../../$(BINDIR)/goreleaser \
-		github.com/goreleaser/goreleaser/v2
+# リリースのツール(goreleaser / gocredits)。版は tools/release/go.mod で固定し、
+# go.sum でハッシュを確かめる。lint / vuln とは別 module である
+# (tools/release/go.mod の冒頭)。release.yml と tagpr.yml も同じ形で呼ぶ。
+#
+# **-modfile で呼び、repo root で実行する。** -C tools/release で呼ぶと、gocredits
+# が tools/release の依存を読み、goreleaser が tools/release をビルドしようとする。
+RELEASE_TOOL := $(GO) tool -modfile=tools/release/go.mod
 
-# .goreleaser.yaml の検査。
-goreleaser-check: $(BINDIR)/goreleaser
-	$(BINDIR)/goreleaser check
+# .goreleaser.yaml の検査。tools/release の tidy もここで見る(tidy-check の注釈)。
+goreleaser-check:
+	$(GO) mod tidy -C tools/release -diff
+	$(RELEASE_TOOL) goreleaser check
+
+# CREDITS(root module の依存のライセンス。gocredits は module graph の全体を並べるので、
+# バイナリにリンクされる依存より広い。リンクされるものは NOTICE にある)。リリース PR が
+# 作り直す(scripts/release-prepare.sh)ので、手で `make credits` してコミットしなくてよい。
+#
+# 一度ファイルへ書いてから比べる。パイプやリダイレクトで直に書くと、gocredits が
+# 落ちたときに「古い」と誤って出るか、CREDITS が空になる。
+credits:
+	$(RELEASE_TOOL) gocredits . > CREDITS.tmp
+	mv CREDITS.tmp CREDITS
+
+credits-check:
+	@$(RELEASE_TOOL) gocredits . > CREDITS.tmp
+	@diff CREDITS.tmp CREDITS \
+		|| { rm -f CREDITS.tmp; echo "CREDITS が古い。make credits で作り直す"; exit 1; }
+	@rm -f CREDITS.tmp
+
+# go.mod / go.sum が tidy か。リリース(.goreleaser.yaml の before.hooks)は
+# tidy しないので、し忘れはここで拾う。**tools/release は goreleaser-check で見る。**
+# goreleaser の module graph は重く、make all のたびに読ませないため(CI でも
+# goreleaser-check のジョブが見る)。
+TIDY_MODULES := $(MODULES) tools
+tidy-check:
+	@for m in $(TIDY_MODULES); do $(GO) mod tidy -C $$m -diff || exit 1; done
 
 lint: $(BINDIR)/golangci-lint
 	@for m in $(MODULES); do \
@@ -190,7 +217,7 @@ vuln: $(BINDIR)/govulncheck
 	$(BINDIR)/govulncheck ./...
 
 tidy:
-	@for m in $(MODULES) tools tools/release; do $(GO) mod tidy -C $$m || exit 1; done
+	@for m in $(TIDY_MODULES) tools/release; do $(GO) mod tidy -C $$m || exit 1; done
 
 clean:
 	rm -f $(BIN) $(CLIENT_BIN)

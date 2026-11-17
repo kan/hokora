@@ -45,7 +45,7 @@ updates:
         patterns:
           - "*"
 
-  # リリースのツール(tools/release/go.mod の goreleaser)。lint / vuln と
+  # リリースのツール(tools/release/go.mod の goreleaser / gocredits)。lint / vuln と
   # build list を共有させないための別 module なので、PR も別に来る。
   # require が全て `// indirect` なのは tools/ と同じ。
   - package-ecosystem: gomod
@@ -54,6 +54,8 @@ updates:
       interval: weekly
     allow:
       - dependency-name: github.com/goreleaser/goreleaser/v2
+        dependency-type: all
+      - dependency-name: github.com/Songmu/gocredits
         dependency-type: all
     groups:
       release-tools:

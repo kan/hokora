@@ -253,7 +253,8 @@ func TestReleaseToolIsIsolatedFromLintTools(t *testing.T) {
 			"github.com/golangci/golangci-lint/v2/cmd/golangci-lint",
 			"golang.org/x/vuln/cmd/govulncheck",
 		}},
-		{"tools/release/go.mod", []string{goreleaser}},
+		// gocredits もリリースのツール(CREDITS の生成)なので、こちらに置く
+		{"tools/release/go.mod", []string{"github.com/Songmu/gocredits/cmd/gocredits", goreleaser}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {
@@ -386,9 +387,15 @@ func TestWorkflowUsesArePinnedByFullVersionTag(t *testing.T) {
 func TestWorkflowWritePermissionsAreConfinedToAllowedJobs(t *testing.T) {
 	t.Parallel()
 
+	// attestation のための scope。リポジトリの中身(コード、タグ、Release、PR)は
+	// 変えられないので、これだけを持つジョブはビルドしてよい(release.yml の build)。
+	attestScopes := []string{"id-token", "attestations", "artifact-metadata"}
+
 	// file の basename → job → 許す write の scope
 	allowed := map[string]map[string][]string{
 		"release.yml": {
+			// attestation の署名と保存
+			"build":   attestScopes,
 			"publish": {"contents"},
 		},
 		"tagpr.yml": {
@@ -403,7 +410,7 @@ func TestWorkflowWritePermissionsAreConfinedToAllowedJobs(t *testing.T) {
 			"rebuild": {"actions", "pull-requests"},
 		},
 	}
-	// 書き込み権限を持つジョブで、Go の依存やツールを取ってきて走らせる
+	// リポジトリへ書けるジョブで、Go の依存やツールを取ってきて走らせる
 	// 兆候。ビルドは release.yml の build ジョブ(contents: read)だけで行う。
 	buildSigns := []string{"actions/setup-go", "goreleaser", "make ", "go build", "go install", "go run", "go tool"}
 
@@ -448,7 +455,9 @@ func TestWorkflowWritePermissionsAreConfinedToAllowedJobs(t *testing.T) {
 				t.Errorf("%s:%d: job %q has %s: write, which is not in the allowlist of this test",
 					file, l.no, l.job, scope)
 			}
-			writeJobs[l.job] = true
+			if !slices.Contains(attestScopes, scope) {
+				writeJobs[l.job] = true
+			}
 		}
 
 		for _, l := range lines {

@@ -22,8 +22,8 @@ jobs:
         with:
           go-version-file: go.mod
           # tools/go.sum (開発ツール) の変更もキャッシュキーに反映させる。
-          # tools/release/go.sum (goreleaser) は CI で使わないので含めない
-          # (goreleaser の更新のたびにキャッシュが外れる)。
+          # tools/release/go.sum (goreleaser) は含めない(goreleaser の更新のたびに
+          # キャッシュが外れる)。tools/release は goreleaser-check のジョブが使う。
           cache-dependency-path: |
             go.sum
             tools/go.sum
@@ -35,6 +35,10 @@ jobs:
 
       - name: gofmt
         run: make fmt-check
+
+      # tools/release は下の goreleaser-check のジョブで見る(Makefile の tidy-check)
+      - name: go mod tidy
+        run: make tidy-check
 
       # docs/ は GitHub Pages の公開元。Liquid として解釈される記法を弾く。
       - name: docs
@@ -75,3 +79,19 @@ jobs:
 
       - name: golangci-lint
         run: make lint
+
+  # .goreleaser.yaml はタグを出すときにしか読まれないので、変更のたびにここで検査する。
+  # goreleaser のビルドは重いので、ほかのジョブと並行に回す。
+  goreleaser-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: tools/release/go.sum
+      # tools/release の tidy も見る
+      - name: goreleaser check
+        run: make goreleaser-check

@@ -153,6 +153,14 @@ Release binaries (recommended):
 #                                hokora-client_<version>_linux_<arch>.tar.gz
 ```
 
+The archives carry a build provenance attestation (releases after 0.5.3): they
+were built by GitHub Actions from this repository's tag. Check a downloaded
+archive with:
+
+```bash
+gh attestation verify hokora_<version>_linux_amd64.tar.gz --repo kan/hokora
+```
+
 From source (Go 1.27+; `go.mod` declares `toolchain go1.27.4`, which
 `GOTOOLCHAIN=auto` fetches automatically):
 

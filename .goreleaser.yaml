@@ -11,6 +11,13 @@
 # GoReleaser is pinned in tools/release/go.mod. Validate locally with:
 #   make goreleaser-check
 #
+# GoReleaser only builds: release.yml runs it with --skip=publish and creates
+# the GitHub release from the files in dist/, so the build runs without the
+# permission to write to the repository.
+#
+# The build is reproducible: the same tag gives the same archives. Timestamps
+# come from the commit, not from the clock.
+#
 # vX.Y.Z and the SDK module's sdk/vX.Y.Z sit on the same commit. release.yml
 # names the version with GORELEASER_CURRENT_TAG. git.ignore_tags cannot do
 # this: v2.20.0 compares its entries exactly, so a glob such as "sdk/*" does
@@ -19,9 +26,12 @@ version: 2
 
 project_name: hokora
 
+# Nothing here changes the tree: a release builds what the tag holds. CI
+# checks that go.mod and go.sum are tidy (make tidy-check).
 before:
   hooks:
     - go mod download
+    - go mod verify
 
 builds:
   - id: hokora
@@ -33,6 +43,7 @@ builds:
     goarch: [amd64, arm64]
     flags: [-trimpath]
     ldflags: [-s -w]
+    mod_timestamp: "{{ .CommitTimestamp }}"
 
   - id: hokora-client
     main: ./cmd/hokora-client
@@ -43,25 +54,53 @@ builds:
     goarch: [amd64, arm64]
     flags: [-trimpath]
     ldflags: [-s -w]
+    mod_timestamp: "{{ .CommitTimestamp }}"
 
+# Files would otherwise carry the time of the checkout, and the user and umask
+# of whoever ran the build. CREDITS holds the licenses of the root module's
+# dependencies (the whole module graph, so more than either binary links; NOTICE
+# lists what each one links). The release PR refreshes it (scripts/release-prepare.sh)
+# and release.yml checks it before building.
 archives:
   - id: hokora
     ids: [hokora]
     name_template: "hokora_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    builds_info: &reproducible_binary
+      owner: root
+      group: root
+      mode: 0755
+      mtime: "{{ .CommitDate }}"
     files:
-      - LICENSE
-      - NOTICE
-      - README.md
-      - docs/OPERATIONS.md
-      - docs/THREAT_MODEL.md
+      - src: LICENSE
+        info: &reproducible_info
+          owner: root
+          group: root
+          mode: 0644
+          mtime: "{{ .CommitDate }}"
+      - src: NOTICE
+        info: *reproducible_info
+      - src: CREDITS
+        info: *reproducible_info
+      - src: README.md
+        info: *reproducible_info
+      - src: docs/OPERATIONS.md
+        info: *reproducible_info
+      - src: docs/THREAT_MODEL.md
+        info: *reproducible_info
 
   - id: hokora-client
     ids: [hokora-client]
     name_template: "hokora-client_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    builds_info: *reproducible_binary
     files:
-      - LICENSE
-      - NOTICE
-      - README.md
+      - src: LICENSE
+        info: *reproducible_info
+      - src: NOTICE
+        info: *reproducible_info
+      - src: CREDITS
+        info: *reproducible_info
+      - src: README.md
+        info: *reproducible_info
 
 checksum:
   name_template: "checksums.txt"
