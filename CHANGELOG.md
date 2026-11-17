@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`modernc.org/sqlite` 1.61.1 → 1.62.0** (with `modernc.org/libc` 1.79.0 →
+  1.80.1). The bundled SQLite stays 3.54.1. The release adds an illumos/amd64
+  port and opt-in features hokora does not enable. No hokora code changes; the
+  DSN and PRAGMA handling is unaffected.
+- **`golang.org/x/crypto` 0.58.0 → 0.59.0** (with `golang.org/x/sys` 0.49.0 →
+  0.50.0). The changes in this release are in the `ssh` packages, which hokora
+  does not use; the `argon2` package hokora uses is unchanged.
+
 ## [0.5.3] - 2026-11-11
 
 ### Security
