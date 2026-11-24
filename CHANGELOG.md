@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-11-24
+
 ### Changed
 
 - **The release archives are built and attested by the shared workflow of
@@ -387,6 +389,7 @@ what it does not.
   rotation, and incident response.
 - **Release tooling**: reproducible Linux amd64/arm64 builds via GoReleaser.
 
+[0.5.5]: https://github.com/kan/hokora/releases/tag/v0.5.5
 [0.5.4]: https://github.com/kan/hokora/releases/tag/v0.5.4
 [0.5.3]: https://github.com/kan/hokora/releases/tag/v0.5.3
 [0.5.2]: https://github.com/kan/hokora/releases/tag/v0.5.2
